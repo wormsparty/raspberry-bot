@@ -3,11 +3,15 @@ mod gemini;
 mod mistral;
 
 use std::error::Error;
-use teloxide::prelude::*;
-use teloxide::types::{ChatAction, /*InputFile,*/ Message};
-use teloxide::utils::command::BotCommands;
-use teloxide::dispatching::dialogue::{InMemStorage, Dialogue};
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use teloxide::dispatching::dialogue::{Dialogue, Storage};
 use teloxide::dispatching::UpdateHandler;
+use teloxide::prelude::*;
+use teloxide::types::{ChatAction, ChatId, /*InputFile,*/ Message};
+use teloxide::utils::command::BotCommands;
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub enum State {
@@ -25,7 +29,73 @@ pub struct Config {
     //pub mistral_api_key: String,
 }
 
-type MyDialogue = Dialogue<State, InMemStorage<State>>;
+#[derive(Clone)]
+pub struct FileStorage {
+    dir: PathBuf,
+}
+
+impl FileStorage {
+    pub fn new(dir: PathBuf) -> Self {
+        let _ = std::fs::create_dir_all(&dir);
+        Self { dir }
+    }
+
+    fn path(&self, chat_id: ChatId) -> PathBuf {
+        self.dir.join(format!("{}.json", chat_id))
+    }
+}
+
+impl<D> Storage<D> for FileStorage
+where
+    D: serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static,
+{
+    type Error = std::io::Error;
+
+    fn get_dialogue(
+        self: Arc<Self>,
+        chat_id: ChatId,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<D>, Self::Error>> + Send + 'static>> {
+        let path = self.path(chat_id);
+        Box::pin(async move {
+            if !path.exists() {
+                return Ok(None);
+            }
+            let content = tokio::fs::read(&path).await?;
+            let dialogue = serde_json::from_slice(&content)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            Ok(Some(dialogue))
+        })
+    }
+
+    fn update_dialogue(
+        self: Arc<Self>,
+        chat_id: ChatId,
+        dialogue: D,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'static>> {
+        let path = self.path(chat_id);
+        Box::pin(async move {
+            let content = serde_json::to_vec(&dialogue)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            tokio::fs::write(&path, content).await?;
+            Ok(())
+        })
+    }
+
+    fn remove_dialogue(
+        self: Arc<Self>,
+        chat_id: ChatId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'static>> {
+        let path = self.path(chat_id);
+        Box::pin(async move {
+            if path.exists() {
+                tokio::fs::remove_file(&path).await?;
+            }
+            Ok(())
+        })
+    }
+}
+
+type MyDialogue = Dialogue<State, FileStorage>;
 type HandlerResult = Result<(), Box<dyn Error + Send + Sync>>;
 
 #[derive(BotCommands, Clone, Debug, PartialEq)]
@@ -33,10 +103,14 @@ type HandlerResult = Result<(), Box<dyn Error + Send + Sync>>;
 enum Command {
     #[command(description = "Commencer une nouvelle enquête.")]
     Start(String),
+    #[command(description = "Réinitialiser l'enquête.")]
+    Restart(String),
     #[command(description = "Afficher l'aide.")]
     Help,
     #[command(description = "Afficher l'historique de l'enquête.")]
     History,
+    #[command(description = "Obtenir un résumé complet de l'histoire pour la reprendre ailleurs.")]
+    Summary,
 }
 
 #[tokio::main]
@@ -68,7 +142,7 @@ async fn main() {
     };
 
     let mut dispatcher = Dispatcher::builder(bot, schema())
-        .dependencies(dptree::deps![InMemStorage::<State>::new(), config])
+        .dependencies(dptree::deps![Arc::new(FileStorage::new(std::path::PathBuf::from("sessions"))), config])
         .enable_ctrlc_handler()
         .build();
 
@@ -79,7 +153,14 @@ fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
     use dptree::case;
 
     let message_handler = Update::filter_message()
-        .enter_dialogue::<Message, InMemStorage<State>, State>()
+        .chain(dptree::filter(|msg: Message| {
+            if let Some(text) = msg.text() {
+                !text.starts_with("/ignore")
+            } else {
+                true
+            }
+        }))
+        .enter_dialogue::<Message, FileStorage, State>()
         .branch(
             teloxide::filter_command::<Command, _>()
                 .endpoint(handle_command),
@@ -107,7 +188,7 @@ async fn handle_command(
     config: Config,
 ) -> HandlerResult {
     match cmd {
-        Command::Start(initial_state) => {
+        Command::Start(initial_state) | Command::Restart(initial_state) => {
             bot.send_message(msg.chat.id, "🛸 Initialisation d'une nouvelle enquête pour Mulder et Scully...").await?;
             bot.send_chat_action(msg.chat.id, ChatAction::Typing).await?;
 
@@ -149,7 +230,9 @@ async fn handle_command(
                              - Le Maître de Jeu décrira les rebondissements de l'histoire.\n\
                              - Si la situation s'y prête, une illustration style 'capture d'écran VHS' sera générée.\n\n\
                              **Commandes :**\n\
-                             /start [état] - Recommencer une nouvelle enquête avec un état initial facultatif\n\
+                             /start [état] - Commencer une nouvelle enquête avec un état initial facultatif\n\
+                             /restart [état] - Réinitialiser l'enquête avec un état initial facultatif\n\
+                             /summary - Obtenir un résumé complet de l'histoire pour la reprendre ailleurs\n\
                              /history - Relire le journal de l'enquête depuis le début\n\
                              /image - Générer une illustration de la scène actuelle\n\
                              /help - Afficher ce message d'aide";
@@ -190,6 +273,39 @@ async fn handle_command(
                         bot.send_message(msg.chat.id, chronicle).await?;
                     } else {
                         bot.send_message(msg.chat.id, "L'histoire commence à peine. Envoyez votre première action !").await?;
+                    }
+                } else {
+                    bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
+                }
+            } else {
+                bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
+            }
+        }
+        Command::Summary => {
+            if let Some(state) = dialogue.get().await? {
+                if let State::Game { state: conv_state } = state {
+                    bot.send_chat_action(msg.chat.id, ChatAction::Typing).await?;
+                    
+                    // --- Choix du modèle LLM ---
+                    // Utilisation de Gemini (Commenté) :
+                    match gemini::get_story_summary(&config.gemini_api_key, &conv_state).await {
+                    
+                    // Utilisation de Mistral :
+                    //match mistral::get_story_summary(&config.mistral_api_key, &conv_state).await {
+                        Ok(summary) => {
+                            let reply = format!(
+                                "📋 **Résumé de l'enquête actuelle (prêt à être copié pour /start ou /restart) :**\n\n```\n{}\n```",
+                                summary
+                            );
+                            bot.send_message(msg.chat.id, reply).await?;
+                        }
+                        Err(e) => {
+                            log::error!("Erreur lors de la génération du résumé : {}", e);
+                            bot.send_message(
+                                msg.chat.id,
+                                "👽 Impossible de générer le résumé. Réessayez !",
+                            ).await?;
+                        }
                     }
                 } else {
                     bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
@@ -269,5 +385,15 @@ mod tests {
 
         let cmd = Command::parse("/start Nous sommes au pôle nord, il fait froid", "bot").unwrap();
         assert_eq!(cmd, Command::Start("Nous sommes au pôle nord, il fait froid".to_string()));
+
+        let cmd = Command::parse("/restart", "bot").unwrap();
+        assert_eq!(cmd, Command::Restart("".to_string()));
+
+        let cmd = Command::parse("/restart Nous sommes au pôle nord, il fait froid", "bot").unwrap();
+        assert_eq!(cmd, Command::Restart("Nous sommes au pôle nord, il fait froid".to_string()));
+
+        let cmd = Command::parse("/summary", "bot").unwrap();
+        assert_eq!(cmd, Command::Summary);
     }
 }
+

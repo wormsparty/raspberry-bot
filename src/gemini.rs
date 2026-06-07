@@ -15,7 +15,7 @@ async fn summarize_history(
 ) -> Result<String, Box<dyn Error + Send + Sync>> {
     let client = reqwest::Client::new();
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={}",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={}",
         api_key
     );
 
@@ -94,7 +94,7 @@ pub async fn generate_story(
     // 4. Appel API
     let client = reqwest::Client::new();
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={}",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={}",
         api_key
     );
 
@@ -155,3 +155,18 @@ pub async fn generate_story(
 
     Ok(story_response)
 }
+
+pub async fn get_story_summary(
+    api_key: &str,
+    state: &ConversationState,
+) -> Result<String, Box<dyn Error + Send + Sync>> {
+    if state.recent.is_empty() {
+        if state.summary.is_empty() {
+            return Ok("Aucune enquête n'est en cours.".to_string());
+        } else {
+            return Ok(state.summary.clone());
+        }
+    }
+    summarize_history(api_key, &state.summary, &state.recent).await
+}
+

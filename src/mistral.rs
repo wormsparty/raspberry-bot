@@ -162,3 +162,18 @@ pub async fn generate_story(
 
     Ok(story_response)
 }
+
+pub async fn get_story_summary(
+    api_key: &str,
+    state: &ConversationState,
+) -> Result<String, Box<dyn Error + Send + Sync>> {
+    if state.recent.is_empty() {
+        if state.summary.is_empty() {
+            return Ok("Aucune enquête n'est en cours.".to_string());
+        } else {
+            return Ok(state.summary.clone());
+        }
+    }
+    summarize_history(api_key, &state.summary, &state.recent).await
+}
+
