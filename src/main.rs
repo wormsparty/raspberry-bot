@@ -22,11 +22,16 @@ pub enum State {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelProvider {
+    Gemini,
+    Mistral,
+}
+
 #[derive(Clone)]
 pub struct Config {
-    // Pour utiliser Gemini à nouveau, décommentez ceci et commentez mistral_api_key
-    pub gemini_api_key: String,
-    //pub mistral_api_key: String,
+    pub provider: ModelProvider,
+    pub api_key: String,
 }
 
 #[derive(Clone)]
@@ -126,19 +131,30 @@ async fn main() {
         }
     }
 
-    // --- Configuration de l'API Key ---
-    // Gemini (Commenté pour utiliser Mistral)
-    let gemini_api_key = std::env::var("GEMINI_API_KEY")
-        .expect("GEMINI_API_KEY doit être défini dans l'environnement ou le fichier .env");
+    // --- Configuration du Modèle et de l'API Key ---
+    let provider_str = std::env::var("MODEL_PROVIDER")
+        .unwrap_or_else(|_| "gemini".to_string())
+        .to_lowercase();
 
-    // Mistral
-    //let mistral_api_key = std::env::var("MISTRAL_API_KEY")
-    //    .expect("MISTRAL_API_KEY doit être défini dans l'environnement ou le fichier .env");
+    let provider = match provider_str.as_str() {
+        "gemini" => ModelProvider::Gemini,
+        "mistral" => ModelProvider::Mistral,
+        other => {
+            panic!("MODEL_PROVIDER inconnu : '{}'. Les valeurs possibles sont 'gemini' ou 'mistral'.", other);
+        }
+    };
+
+    let api_key = match provider {
+        ModelProvider::Gemini => std::env::var("GEMINI_API_KEY")
+            .expect("GEMINI_API_KEY doit être défini dans l'environnement ou le fichier .env pour utiliser Gemini"),
+        ModelProvider::Mistral => std::env::var("MISTRAL_API_KEY")
+            .expect("MISTRAL_API_KEY doit être défini dans l'environnement ou le fichier .env pour utiliser Mistral"),
+    };
 
     let bot = Bot::from_env();
     let config = Config {
-        gemini_api_key,
-        //mistral_api_key,
+        provider,
+        api_key,
     };
 
     let mut dispatcher = Dispatcher::builder(bot, schema())
@@ -203,11 +219,12 @@ async fn handle_command(
             };
 
             // --- Choix du modèle LLM ---
-            // Utilisation de Gemini (Commenté) :
-            match gemini::generate_story(&config.gemini_api_key, &mut conv_state, &start_msg).await {
-            
-            // Utilisation de Mistral :
-            //match mistral::generate_story(&config.mistral_api_key, &mut conv_state, &start_msg).await {
+            let story_result = match config.provider {
+                ModelProvider::Gemini => gemini::generate_story(&config.api_key, &mut conv_state, &start_msg).await,
+                ModelProvider::Mistral => mistral::generate_story(&config.api_key, &mut conv_state, &start_msg).await,
+            };
+
+            match story_result {
                 Ok(story_response) => {
                     dialogue.update(State::Game { state: conv_state }).await?;
 
@@ -285,11 +302,12 @@ async fn handle_command(
                     bot.send_chat_action(msg.chat.id, ChatAction::Typing).await?;
                     
                     // --- Choix du modèle LLM ---
-                    // Utilisation de Gemini (Commenté) :
-                    match gemini::get_story_summary(&config.gemini_api_key, &conv_state).await {
-                    
-                    // Utilisation de Mistral :
-                    //match mistral::get_story_summary(&config.mistral_api_key, &conv_state).await {
+                    let summary_result = match config.provider {
+                        ModelProvider::Gemini => gemini::get_story_summary(&config.api_key, &conv_state).await,
+                        ModelProvider::Mistral => mistral::get_story_summary(&config.api_key, &conv_state).await,
+                    };
+
+                    match summary_result {
                         Ok(summary) => {
                             let reply = format!(
                                 "📋 **Résumé de l'enquête actuelle (prêt à être copié pour /start ou /restart) :**\n\n```\n{}\n```",
@@ -350,11 +368,12 @@ async fn handle_game_state(
     let mut conv_state = state;
 
     // --- Choix du modèle LLM ---
-    // Utilisation de Gemini (Commenté) :
-    match gemini::generate_story(&config.gemini_api_key, &mut conv_state, text).await {
+    let story_result = match config.provider {
+        ModelProvider::Gemini => gemini::generate_story(&config.api_key, &mut conv_state, text).await,
+        ModelProvider::Mistral => mistral::generate_story(&config.api_key, &mut conv_state, text).await,
+    };
 
-    // Utilisation de Mistral :
-    //match mistral::generate_story(&config.mistral_api_key, &mut conv_state, text).await {
+    match story_result {
         Ok(story_response) => {
             dialogue.update(State::Game { state: conv_state }).await?;
 
