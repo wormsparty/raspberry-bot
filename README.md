@@ -1,0 +1,123 @@
+# 🛸 Mulder & Scully - Telegram AI Dungeon Bot (Rust)
+
+Ce projet est un exemple de bot Telegram codé en Rust qui permet de jouer à une aventure textuelle de type "AI Dungeon" en co-écriture avec un ami. L'histoire suit les agents Fox Mulder et Dana Scully dans des enquêtes humoristiques, absurdes et surréalistes (maisons marchantes, tableaux de Freud récurrents, etc.). 
+
+Le bot utilise l'API **Gemini 2.5 Flash** pour la narration (avec un schéma JSON structuré pour garantir un comportement fiable) et **Imagen 4.0** pour générer des illustrations automatiques ou à la demande ressemblant à des captures d'écran VHS rétro de la série télévisée des années 90 !
+
+---
+
+## 🛠️ Fonctionnalités du Bot
+
+- **Narrateur interactif** : Gemini joue le rôle de Maître de Jeu (MJ) et décrit les conséquences absurdes de vos actions.
+- **Illustrations automatiques** : Lorsque la scène est très visuelle (ex: découverte d'un tableau de Freud dans les bois), le MJ génère automatiquement une image de style X-Files.
+- **Mode multijoueur (Groupes)** : Ajoutez le bot dans un groupe avec votre ami. Le bot maintient l'état de l'histoire pour le groupe entier, permettant de jouer à deux en prenant des tours.
+- **Commandes intégrées** :
+  - `/start` : Démarre une nouvelle enquête absurde.
+  - `/history` : Affiche l'historique complet de l'histoire générée.
+  - `/image` : Force la génération d'une illustration pour la situation actuelle.
+  - `/help` : Affiche l'aide et les commandes.
+
+---
+
+## 📋 Prérequis
+
+1. **Rust** installé sur votre machine (développement) ou sur le Raspberry Pi.
+2. **Un Token de Bot Telegram** (créé via `@BotFather`).
+3. **Une clé API Gemini avec facturation activée** (les modèles de génération d'image comme Imagen 4 nécessitent de lier un compte de facturation payant "Pay-as-you-go" à votre projet Google AI Studio, même si la consommation reste minime, car ils ne sont pas disponibles sur le niveau gratuit).
+
+---
+
+## ⚙️ Configuration
+
+1. Clonez ou copiez ce dossier sur votre Raspberry Pi (ou machine de dev).
+2. Créez un fichier nommé `.env` à la racine du projet (`/home/mob/xfiles_bot/.env`) et ajoutez vos clés :
+
+```env
+# Token Telegram (obtenu auprès de @BotFather)
+TELEGRAM_BOT_TOKEN=ton_token_telegram_ici
+
+# Clé API Gemini (obtenue sur Google AI Studio)
+GEMINI_API_KEY=ta_cle_gemini_ici
+
+# Modèle d'image utilisé par défaut (optionnel, défaut : imagen-4.0-generate-001)
+# Vous pouvez aussi utiliser imagen-4.0-fast-generate-001 pour moins de latence/coûts
+IMAGEN_MODEL=imagen-4.0-generate-001
+
+# Niveau de log pour la console
+RUST_LOG=info
+```
+
+> [!IMPORTANT]
+> **Pour jouer dans un groupe Telegram avec votre ami :**
+> Par défaut, les bots Telegram ne lisent pas tous les messages d'un groupe (pour des raisons de confidentialité).
+> Pour que le bot puisse réagir à chaque action de l'histoire dans un groupe, vous devez :
+> 1. Ouvrir une discussion avec `@BotFather`.
+> 2. Envoyer la commande `/setprivacy`.
+> 3. Sélectionner votre bot.
+> 4. Choisir **Disable** (Désactiver).
+> *(Alternativement, vous pouvez simplement promouvoir le bot en tant qu'administrateur du groupe)*.
+
+---
+
+## 🚀 Lancement local (Développement)
+
+Pour tester le bot et vérifier que tout fonctionne :
+
+```bash
+cargo run
+```
+
+---
+
+## 📦 Déploiement permanent sur Raspberry Pi
+
+Pour faire tourner le bot de manière stable et permanente sur votre Raspberry Pi :
+
+### 1. Compiler en mode Release
+La compilation sur Raspberry Pi peut prendre quelques minutes mais produira un exécutable optimisé.
+```bash
+cargo build --release
+```
+L'exécutable compilé se trouvera dans `target/release/xfiles_bot`.
+
+### 2. Configurer un service Systemd (Recommandé)
+Pour que le bot se lance automatiquement au démarrage du Raspberry Pi et redémarre en cas de plantage :
+
+Créez un fichier de service systemd (par exemple `/etc/systemd/system/xfiles-bot.service`) avec les droits super-utilisateur (`sudo nano /etc/systemd/system/xfiles-bot.service`) :
+
+```ini
+[Unit]
+Description=Mulder and Scully Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=mob
+WorkingDirectory=/home/mob/xfiles_bot
+ExecStart=/home/mob/xfiles_bot/target/release/xfiles_bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Activez et démarrez le service :
+
+```bash
+sudo systemctl enable xfiles-bot.service
+sudo systemctl start xfiles-bot.service
+```
+
+Pour voir les logs du bot en temps réel :
+```bash
+sudo journalctl -u xfiles-bot.service -f
+```
+
+---
+
+## 🔍 Structure du Code
+
+- [Cargo.toml](file:///home/mob/xfiles_bot/Cargo.toml) : Gère les dépendances (Teloxide, Reqwest, Serde, Tokio).
+- [src/gemini.rs](file:///home/mob/xfiles_bot/src/gemini.rs) : Contient l'intégration avec les API REST de Gemini (génération de texte structuré JSON) et Imagen 3 (génération d'images et décodage Base64).
+- [src/main.rs](file:///home/mob/xfiles_bot/src/main.rs) : Contient la logique du bot Telegram, les gestionnaires de commandes, et la machine à états de dialogue.
