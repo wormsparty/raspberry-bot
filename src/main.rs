@@ -212,6 +212,16 @@ async fn handle_game_state(
     let text = match msg.text() {
         Some(t) => t,
         None => {
+            if msg.photo().is_some() || msg.animation().is_some() {
+                return Ok(());
+            }
+            if let Some(doc) = msg.document() {
+                if let Some(mime) = &doc.mime_type {
+                    if mime.as_ref().starts_with("image/") {
+                        return Ok(());
+                    }
+                }
+            }
             bot.send_message(msg.chat.id, "Veuillez m'envoyer un message texte pour décrire vos actions !").await?;
             return Ok(());
         }
