@@ -89,12 +89,12 @@ pub async fn generate_story(
     // Injecter la consigne système (avec le résumé de l'enquête s'il existe)
     let system_text = if state.summary.is_empty() {
         format!(
-            "{}\n\nIMPORTANT: Tu dois impérativement répondre sous la forme d'un objet JSON contenant les clés suivantes :\n- \"story_text\" (string) : Le texte décrivant la suite de l'histoire et les actions des personnages\n- \"should_generate_image\" (boolean) : Vrai si l'action ou la scène actuelle mérite grandement une illustration visuelle\n- \"image_prompt\" (string) : Le prompt en anglais décrivant précisément l'illustration de style X-files à générer (seulement si should_generate_image est vrai, sinon chaîne vide).",
+            "{}\n\nIMPORTANT: Tu dois impérativement répondre sous la forme d'un objet JSON contenant la clé suivante :\n- \"story_text\" (string) : Le texte décrivant la suite de l'histoire et les actions des personnages",
             SYSTEM_INSTRUCTION
         )
     } else {
         format!(
-            "{}\n\n[Résumé de l'enquête jusqu'ici : {}]\n\nIMPORTANT: Tu dois impérativement répondre sous la forme d'un objet JSON contenant les clés suivantes :\n- \"story_text\" (string) : Le texte décrivant la suite de l'histoire et les actions des personnages\n- \"should_generate_image\" (boolean) : Vrai si l'action ou la scène actuelle mérite grandement une illustration visuelle\n- \"image_prompt\" (string) : Le prompt en anglais décrivant précisément l'illustration de style X-files à générer (seulement si should_generate_image est vrai, sinon chaîne vide).",
+            "{}\n\n[Résumé de l'enquête jusqu'ici : {}]\n\nIMPORTANT: Tu dois impérativement répondre sous la forme d'un objet JSON contenant la clé suivante :\n- \"story_text\" (string) : Le texte décrivant la suite de l'histoire et les actions des personnages",
             SYSTEM_INSTRUCTION, state.summary
         )
     };

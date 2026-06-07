@@ -2,19 +2,17 @@
 
 Ce projet est un exemple de bot Telegram codé en Rust qui permet de jouer à une aventure textuelle de type "AI Dungeon" en co-écriture avec un ami. L'histoire suit les agents Fox Mulder et Dana Scully dans des enquêtes humoristiques, absurdes et surréalistes (maisons marchantes, tableaux de Freud récurrents, etc.). 
 
-Le bot utilise l'API **Gemini 2.5 Flash** pour la narration (avec un schéma JSON structuré pour garantir un comportement fiable) et **Imagen 4.0** pour générer des illustrations automatiques ou à la demande ressemblant à des captures d'écran VHS rétro de la série télévisée des années 90 !
+Le bot utilise l'API **Gemini** pour la narration (avec un schéma JSON structuré pour garantir un comportement fiable).
 
 ---
 
 ## 🛠️ Fonctionnalités du Bot
 
 - **Narrateur interactif** : Gemini joue le rôle de Maître de Jeu (MJ) et décrit les conséquences absurdes de vos actions.
-- **Illustrations automatiques** : Lorsque la scène est très visuelle (ex: découverte d'un tableau de Freud dans les bois), le MJ génère automatiquement une image de style X-Files.
 - **Mode multijoueur (Groupes)** : Ajoutez le bot dans un groupe avec votre ami. Le bot maintient l'état de l'histoire pour le groupe entier, permettant de jouer à deux en prenant des tours.
 - **Commandes intégrées** :
   - `/start [état initial]` : Démarre une nouvelle enquête absurde. Vous pouvez lui spécifier un état initial (ex : `/start Nous sommes au pôle nord, il fait froid`).
   - `/history` : Affiche l'historique complet de l'histoire générée.
-  - `/image` : Force la génération d'une illustration pour la situation actuelle.
   - `/help` : Affiche l'aide et les commandes.
 
 ---
@@ -23,7 +21,7 @@ Le bot utilise l'API **Gemini 2.5 Flash** pour la narration (avec un schéma JSO
 
 1. **Rust** installé sur votre machine (développement) ou sur le Raspberry Pi.
 2. **Un Token de Bot Telegram** (créé via `@BotFather`).
-3. **Une clé API Gemini avec facturation activée** (les modèles de génération d'image comme Imagen 4 nécessitent de lier un compte de facturation payant "Pay-as-you-go" à votre projet Google AI Studio, même si la consommation reste minime, car ils ne sont pas disponibles sur le niveau gratuit).
+3. **Une clé API Gemini** (obtenue sur Google AI Studio).
 
 ---
 
@@ -38,10 +36,6 @@ TELEGRAM_BOT_TOKEN=ton_token_telegram_ici
 
 # Clé API Gemini (obtenue sur Google AI Studio)
 GEMINI_API_KEY=ta_cle_gemini_ici
-
-# Modèle d'image utilisé par défaut (optionnel, défaut : imagen-4.0-generate-001)
-# Vous pouvez aussi utiliser imagen-4.0-fast-generate-001 pour moins de latence/coûts
-IMAGEN_MODEL=imagen-4.0-generate-001
 
 # Niveau de log pour la console
 RUST_LOG=info
@@ -119,5 +113,5 @@ sudo journalctl -u xfiles-bot.service -f
 ## 🔍 Structure du Code
 
 - [Cargo.toml](file:///home/mob/xfiles_bot/Cargo.toml) : Gère les dépendances (Teloxide, Reqwest, Serde, Tokio).
-- [src/gemini.rs](file:///home/mob/xfiles_bot/src/gemini.rs) : Contient l'intégration avec les API REST de Gemini (génération de texte structuré JSON) et Imagen 3 (génération d'images et décodage Base64).
+- [src/gemini.rs](file:///home/mob/xfiles_bot/src/gemini.rs) : Contient l'intégration avec les API REST de Gemini (génération de texte structuré JSON).
 - [src/main.rs](file:///home/mob/xfiles_bot/src/main.rs) : Contient la logique du bot Telegram, les gestionnaires de commandes, et la machine à états de dialogue.

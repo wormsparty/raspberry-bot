@@ -14,8 +14,6 @@ pub struct Part {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StoryResponse {
     pub story_text: String,
-    pub should_generate_image: bool,
-    pub image_prompt: String,
 }
 
 // Structure pour gérer l'état de la conversation
@@ -39,9 +37,4 @@ Directives de ton et de style :
 4. Reste concis : 1 à 3 paragraphes maximum par réponse. Pas de gras, pas de listes. Prose narrative, style téléfilm.
 5. L'enquête doit progresser à chaque tour : nouveaux indices, rebondissements, suspects, lieux. Évite les actions sans conséquence. Chaque message fait avancer l'histoire.
 6. Termine toujours par une situation ouverte ou une observation qui invite le joueur à décrire son action suivante.
-
-Directives de génération d'image :
-1. Illustre les moments clés : découverte d'un indice, apparition du phénomène, confrontation.
-2. Ne mentionne pas 'Mulder', 'Scully' ou 'X-Files' dans le prompt d'image. Décris-les : 'a male FBI agent in a dark suit' et 'a female FBI agent with red bob hair and a trench coat'.
-3. Style visuel : 'A grainy, retro 1990s television sci-fi series VHS screenshot of [scène]. Muted colors, dark moody lighting, foggy atmosphere, 35mm film grain, analog video distortion.'
 "#;

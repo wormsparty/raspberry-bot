@@ -111,17 +111,9 @@ pub async fn generate_story(
                     "story_text": {
                         "type": "string",
                         "description": "Le texte décrivant la suite de l'histoire et les actions des personnages"
-                    },
-                    "should_generate_image": {
-                        "type": "boolean",
-                        "description": "Vrai si l'action ou la scène actuelle mérite grandement une illustration visuelle"
-                    },
-                    "image_prompt": {
-                        "type": "string",
-                        "description": "Le prompt en anglais décrivant précisément l'illustration de style X-files à générer, seulement si should_generate_image est vrai. Sinon, chaîne vide."
                     }
                 },
-                "required": ["story_text", "should_generate_image", "image_prompt"]
+                "required": ["story_text"]
             },
             "temperature": 1.0
         }

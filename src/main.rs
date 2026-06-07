@@ -227,14 +227,12 @@ async fn handle_command(
                              Vous co-écrivez une enquête avec Mulder et Scully.\n\n\
                              **Comment jouer :**\n\
                              - Écrivez simplement ce que font ou disent nos deux agents (ex: 'Mulder fouille la poubelle').\n\
-                             - Le Maître de Jeu décrira les rebondissements de l'histoire.\n\
-                             - Si la situation s'y prête, une illustration style 'capture d'écran VHS' sera générée.\n\n\
+                             - Le Maître de Jeu décrira les rebondissements de l'histoire.\n\n\
                              **Commandes :**\n\
                              /start [état] - Commencer une nouvelle enquête avec un état initial facultatif\n\
                              /restart [état] - Réinitialiser l'enquête avec un état initial facultatif\n\
                              /summary - Obtenir un résumé complet de l'histoire pour la reprendre ailleurs\n\
                              /history - Relire le journal de l'enquête depuis le début\n\
-                             /image - Générer une illustration de la scène actuelle\n\
                              /help - Afficher ce message d'aide";
             bot.send_message(msg.chat.id, help_text).await?;
         }
