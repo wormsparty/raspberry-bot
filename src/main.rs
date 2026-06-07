@@ -2,7 +2,7 @@ mod gemini;
 
 use std::error::Error;
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, InputFile, Message};
+use teloxide::types::{ChatAction, /*InputFile,*/ Message};
 use teloxide::utils::command::BotCommands;
 use teloxide::dispatching::dialogue::{InMemStorage, Dialogue};
 use teloxide::dispatching::UpdateHandler;
@@ -12,7 +12,7 @@ pub enum State {
     #[default]
     Start,
     Game {
-        history: Vec<gemini::MessageContent>,
+        state: gemini::ConversationState,
     },
 }
 
@@ -33,23 +33,20 @@ enum Command {
     Help,
     #[command(description = "Afficher l'historique de l'enquête.")]
     History,
-    #[command(description = "Générer une illustration pour la scène courante.")]
-    Image,
+    /*#[command(description = "Générer une illustration pour la scène courante.")]
+    Image,*/
 }
 
 #[tokio::main]
 async fn main() {
-    // Load environment variables from .env file if it exists
     dotenvy::dotenv().ok();
-    
-    // Initialize logger
     pretty_env_logger::init();
     log::info!("Démarrage du bot X-Files...");
 
-    // Quality of life: permit using either TELEGRAM_BOT_TOKEN or TELOXIDE_TOKEN
     if std::env::var("TELOXIDE_TOKEN").is_err() {
         if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
-            std::env::set_var("TELOXIDE_TOKEN", token);
+            // SAFETY: single-threaded initialization before tokio runtime starts
+            unsafe { std::env::set_var("TELOXIDE_TOKEN", token) };
         }
     }
 
@@ -77,7 +74,7 @@ fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
                 .endpoint(handle_command),
         )
         .branch(case![State::Start].endpoint(handle_start_state))
-        .branch(case![State::Game { history }].endpoint(handle_game_state));
+        .branch(case![State::Game { state }].endpoint(handle_game_state));
 
     message_handler
 }
@@ -85,7 +82,7 @@ fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
 async fn handle_start_state(bot: Bot, msg: Message) -> HandlerResult {
     bot.send_message(
         msg.chat.id,
-        "🛸 Aucune enquête n'est en cours.\n\nTapez /start pour commencer une aventure absurde avec Mulder et Scully !",
+        "🛸 Aucune enquête n'est en cours.\n\nTapez /start pour commencer une aventure avec Mulder et Scully !",
     )
     .await?;
     Ok(())
@@ -100,34 +97,19 @@ async fn handle_command(
 ) -> HandlerResult {
     match cmd {
         Command::Start => {
-            bot.send_message(msg.chat.id, "🛸 Initialisation d'une nouvelle enquête absurde pour Mulder et Scully...").await?;
+            bot.send_message(msg.chat.id, "🛸 Initialisation d'une nouvelle enquête pour Mulder et Scully...").await?;
             bot.send_chat_action(msg.chat.id, ChatAction::Typing).await?;
 
-            let user_msg = gemini::MessageContent {
-                role: "user".to_string(),
-                parts: vec![gemini::Part {
-                    text: "Commence une nouvelle histoire absurde et drôle de Mulder et Scully.".to_string(),
-                }],
-            };
-            let history = vec![user_msg];
+            let mut conv_state = gemini::ConversationState::default();
+            let start_msg = "Commence une nouvelle enquête de Mulder et Scully.".to_string();
 
-            match gemini::generate_story(&config.gemini_api_key, &history).await {
+            match gemini::generate_story(&config.gemini_api_key, &mut conv_state, &start_msg).await {
                 Ok(story_response) => {
-                    let mut new_history = history;
-                    
-                    let model_msg = gemini::MessageContent {
-                        role: "model".to_string(),
-                        parts: vec![gemini::Part {
-                            text: serde_json::to_string(&story_response)?,
-                        }],
-                    };
-                    new_history.push(model_msg);
+                    dialogue.update(State::Game { state: conv_state }).await?;
 
-                    dialogue.update(State::Game { history: new_history }).await?;
-                    
                     bot.send_message(msg.chat.id, &story_response.story_text).await?;
 
-                    if story_response.should_generate_image {
+                    /*if story_response.should_generate_image {
                         bot.send_chat_action(msg.chat.id, ChatAction::UploadPhoto).await?;
                         log::info!("Génération de l'image de début avec le prompt: {}", story_response.image_prompt);
                         match gemini::generate_image(&config.gemini_api_key, &story_response.image_prompt).await {
@@ -138,12 +120,12 @@ async fn handle_command(
                                 log::error!("Erreur lors de la génération d'image : {}", e);
                             }
                         }
-                    }
+                    }*/
                 }
                 Err(e) => {
                     log::error!("Erreur lors du démarrage du jeu : {}", e);
                     bot.send_message(
-                        msg.chat.id, 
+                        msg.chat.id,
                         "👽 Les ondes cosmiques perturbent l'API (impossible de démarrer l'enquête). Réessayez !",
                     ).await?;
                 }
@@ -151,13 +133,13 @@ async fn handle_command(
         }
         Command::Help => {
             let help_text = "🕵️‍♂️ **Bienvenue dans l'X-Files Generator !** 🕵️‍♀️\n\n\
-                             Vous co-écrivez une enquête totalement absurde avec Mulder et Scully.\n\n\
+                             Vous co-écrivez une enquête avec Mulder et Scully.\n\n\
                              **Comment jouer :**\n\
-                             - Écrivez simplement ce que font ou disent nos deux agents fétiches (ex: 'Mulder fouille la poubelle à la recherche d'une peinture de Freud').\n\
-                             - Le Maître de Jeu (Gemini) décrira les rebondissements de l'histoire.\n\
+                             - Écrivez simplement ce que font ou disent nos deux agents (ex: 'Mulder fouille la poubelle').\n\
+                             - Le Maître de Jeu décrira les rebondissements de l'histoire.\n\
                              - Si la situation s'y prête, une illustration style 'capture d'écran VHS' sera générée.\n\n\
                              **Commandes :**\n\
-                             /start - Recommencer une nouvelle enquête absurde\n\
+                             /start - Recommencer une nouvelle enquête\n\
                              /history - Relire le journal de l'enquête depuis le début\n\
                              /image - Générer une illustration de la scène actuelle\n\
                              /help - Afficher ce message d'aide";
@@ -165,17 +147,26 @@ async fn handle_command(
         }
         Command::History => {
             if let Some(state) = dialogue.get().await? {
-                if let State::Game { history } = state {
+                if let State::Game { state: conv_state } = state {
                     let mut chronicle = String::from("📖 **Journal de l'enquête :**\n\n");
+
+                    if !conv_state.summary.is_empty() {
+                        chronicle.push_str(&format!("📋 _Résumé des événements passés : {}_\n\n---\n\n", conv_state.summary));
+                    }
+
                     let mut has_entries = false;
-                    for msg_item in &history {
+                    for msg_item in &conv_state.recent {
                         if msg_item.role == "user" {
-                            if msg_item.parts[0].text == "Commence une nouvelle histoire absurde et drôle de Mulder et Scully." {
+                            if msg_item.parts[0].text == "Commence une nouvelle enquête de Mulder et Scully." {
                                 continue;
                             }
                             chronicle.push_str(&format!("👉 _Action : {}_\n\n", msg_item.parts[0].text));
                             has_entries = true;
-                        } else {
+                        } else if msg_item.role == "model" {
+                            // Ignorer le message de résumé injecté (commence par "[Résumé")
+                            if msg_item.parts[0].text.starts_with("[Résumé") {
+                                continue;
+                            }
                             if let Ok(story) = serde_json::from_str::<gemini::StoryResponse>(&msg_item.parts[0].text) {
                                 chronicle.push_str(&format!("{}\n\n", story.story_text));
                             } else {
@@ -184,7 +175,8 @@ async fn handle_command(
                             has_entries = true;
                         }
                     }
-                    if has_entries {
+
+                    if has_entries || !conv_state.summary.is_empty() {
                         bot.send_message(msg.chat.id, chronicle).await?;
                     } else {
                         bot.send_message(msg.chat.id, "L'histoire commence à peine. Envoyez votre première action !").await?;
@@ -196,10 +188,10 @@ async fn handle_command(
                 bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
             }
         }
-        Command::Image => {
+        /*Command::Image => {
             if let Some(state) = dialogue.get().await? {
-                if let State::Game { history } = state {
-                    if let Some(last_msg) = history.iter().rev().find(|m| m.role == "model") {
+                if let State::Game { state: conv_state } = state {
+                    if let Some(last_msg) = conv_state.recent.iter().rev().find(|m| m.role == "model" && !m.parts[0].text.starts_with("[Résumé")) {
                         if let Ok(story) = serde_json::from_str::<gemini::StoryResponse>(&last_msg.parts[0].text) {
                             let prompt = if !story.image_prompt.is_empty() {
                                 story.image_prompt.clone()
@@ -220,7 +212,7 @@ async fn handle_command(
                                 Err(e) => {
                                     log::error!("Erreur lors de la génération forcée : {}", e);
                                     bot.send_message(
-                                        msg.chat.id, 
+                                        msg.chat.id,
                                         "❌ Impossible de générer l'illustration. Les forces occultes ont bloqué l'image !",
                                     ).await?;
                                 }
@@ -237,7 +229,7 @@ async fn handle_command(
             } else {
                 bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
             }
-        }
+        }*/
     }
     Ok(())
 }
@@ -245,7 +237,7 @@ async fn handle_command(
 async fn handle_game_state(
     bot: Bot,
     dialogue: MyDialogue,
-    mut history: Vec<gemini::MessageContent>,
+    state: gemini::ConversationState,
     msg: Message,
     config: Config,
 ) -> HandlerResult {
@@ -257,39 +249,20 @@ async fn handle_game_state(
         }
     };
 
-    // Ignore commands (they are processed by the filter_command branch)
     if text.starts_with('/') {
         return Ok(());
     }
 
     bot.send_chat_action(msg.chat.id, ChatAction::Typing).await?;
 
-    let user_msg = gemini::MessageContent {
-        role: "user".to_string(),
-        parts: vec![gemini::Part {
-            text: text.to_string(),
-        }],
-    };
-    history.push(user_msg);
+    let mut conv_state = state;
 
-    // Call Gemini
-    match gemini::generate_story(&config.gemini_api_key, &history).await {
+    match gemini::generate_story(&config.gemini_api_key, &mut conv_state, text).await {
         Ok(story_response) => {
-            let model_msg = gemini::MessageContent {
-                role: "model".to_string(),
-                parts: vec![gemini::Part {
-                    text: serde_json::to_string(&story_response)?,
-                }],
-            };
-            history.push(model_msg);
+            dialogue.update(State::Game { state: conv_state }).await?;
 
-            // Update dialogue
-            dialogue.update(State::Game { history }).await?;
-
-            // Send story text
             bot.send_message(msg.chat.id, &story_response.story_text).await?;
-
-            // Generate image if requested by Gemini
+/*
             if story_response.should_generate_image {
                 bot.send_chat_action(msg.chat.id, ChatAction::UploadPhoto).await?;
                 log::info!("Génération d'une image avec le prompt: {}", story_response.image_prompt);
@@ -301,14 +274,12 @@ async fn handle_game_state(
                         log::error!("Erreur lors de la génération d'image : {}", e);
                     }
                 }
-            }
+            }*/
         }
         Err(e) => {
             log::error!("Erreur lors de la génération de l'histoire : {}", e);
-            // Pop the last user action so history is clean
-            history.pop();
             bot.send_message(
-                msg.chat.id, 
+                msg.chat.id,
                 "👽 L'espace-temps s'est plié anormalement. Veuillez reformuler ou réécrire votre dernière action !",
             ).await?;
         }
