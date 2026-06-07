@@ -1,4 +1,6 @@
+mod common;
 mod gemini;
+mod mistral;
 
 use std::error::Error;
 use teloxide::prelude::*;
@@ -12,29 +14,29 @@ pub enum State {
     #[default]
     Start,
     Game {
-        state: gemini::ConversationState,
+        state: common::ConversationState,
     },
 }
 
 #[derive(Clone)]
 pub struct Config {
+    // Pour utiliser Gemini à nouveau, décommentez ceci et commentez mistral_api_key
     pub gemini_api_key: String,
+    //pub mistral_api_key: String,
 }
 
 type MyDialogue = Dialogue<State, InMemStorage<State>>;
 type HandlerResult = Result<(), Box<dyn Error + Send + Sync>>;
 
-#[derive(BotCommands, Clone)]
+#[derive(BotCommands, Clone, Debug, PartialEq)]
 #[command(rename_rule = "lowercase", description = "Commandes de l'enquête :")]
 enum Command {
     #[command(description = "Commencer une nouvelle enquête.")]
-    Start,
+    Start(String),
     #[command(description = "Afficher l'aide.")]
     Help,
     #[command(description = "Afficher l'historique de l'enquête.")]
     History,
-    /*#[command(description = "Générer une illustration pour la scène courante.")]
-    Image,*/
 }
 
 #[tokio::main]
@@ -50,11 +52,20 @@ async fn main() {
         }
     }
 
+    // --- Configuration de l'API Key ---
+    // Gemini (Commenté pour utiliser Mistral)
     let gemini_api_key = std::env::var("GEMINI_API_KEY")
         .expect("GEMINI_API_KEY doit être défini dans l'environnement ou le fichier .env");
 
+    // Mistral
+    //let mistral_api_key = std::env::var("MISTRAL_API_KEY")
+    //    .expect("MISTRAL_API_KEY doit être défini dans l'environnement ou le fichier .env");
+
     let bot = Bot::from_env();
-    let config = Config { gemini_api_key };
+    let config = Config {
+        gemini_api_key,
+        //mistral_api_key,
+    };
 
     let mut dispatcher = Dispatcher::builder(bot, schema())
         .dependencies(dptree::deps![InMemStorage::<State>::new(), config])
@@ -96,31 +107,30 @@ async fn handle_command(
     config: Config,
 ) -> HandlerResult {
     match cmd {
-        Command::Start => {
+        Command::Start(initial_state) => {
             bot.send_message(msg.chat.id, "🛸 Initialisation d'une nouvelle enquête pour Mulder et Scully...").await?;
             bot.send_chat_action(msg.chat.id, ChatAction::Typing).await?;
 
-            let mut conv_state = gemini::ConversationState::default();
-            let start_msg = "Commence une nouvelle enquête de Mulder et Scully.".to_string();
+            let mut conv_state = common::ConversationState::default();
+            let start_msg = if initial_state.trim().is_empty() {
+                "Commence une nouvelle enquête de Mulder et Scully.".to_string()
+            } else {
+                format!(
+                    "Commence une nouvelle enquête de Mulder et Scully. État initial : {}",
+                    initial_state.trim()
+                )
+            };
 
+            // --- Choix du modèle LLM ---
+            // Utilisation de Gemini (Commenté) :
             match gemini::generate_story(&config.gemini_api_key, &mut conv_state, &start_msg).await {
+            
+            // Utilisation de Mistral :
+            //match mistral::generate_story(&config.mistral_api_key, &mut conv_state, &start_msg).await {
                 Ok(story_response) => {
                     dialogue.update(State::Game { state: conv_state }).await?;
 
                     bot.send_message(msg.chat.id, &story_response.story_text).await?;
-
-                    /*if story_response.should_generate_image {
-                        bot.send_chat_action(msg.chat.id, ChatAction::UploadPhoto).await?;
-                        log::info!("Génération de l'image de début avec le prompt: {}", story_response.image_prompt);
-                        match gemini::generate_image(&config.gemini_api_key, &story_response.image_prompt).await {
-                            Ok(image_bytes) => {
-                                bot.send_photo(msg.chat.id, InputFile::memory(image_bytes)).await?;
-                            }
-                            Err(e) => {
-                                log::error!("Erreur lors de la génération d'image : {}", e);
-                            }
-                        }
-                    }*/
                 }
                 Err(e) => {
                     log::error!("Erreur lors du démarrage du jeu : {}", e);
@@ -139,7 +149,7 @@ async fn handle_command(
                              - Le Maître de Jeu décrira les rebondissements de l'histoire.\n\
                              - Si la situation s'y prête, une illustration style 'capture d'écran VHS' sera générée.\n\n\
                              **Commandes :**\n\
-                             /start - Recommencer une nouvelle enquête\n\
+                             /start [état] - Recommencer une nouvelle enquête avec un état initial facultatif\n\
                              /history - Relire le journal de l'enquête depuis le début\n\
                              /image - Générer une illustration de la scène actuelle\n\
                              /help - Afficher ce message d'aide";
@@ -167,7 +177,7 @@ async fn handle_command(
                             if msg_item.parts[0].text.starts_with("[Résumé") {
                                 continue;
                             }
-                            if let Ok(story) = serde_json::from_str::<gemini::StoryResponse>(&msg_item.parts[0].text) {
+                            if let Ok(story) = serde_json::from_str::<common::StoryResponse>(&msg_item.parts[0].text) {
                                 chronicle.push_str(&format!("{}\n\n", story.story_text));
                             } else {
                                 chronicle.push_str(&format!("{}\n\n", msg_item.parts[0].text));
@@ -188,48 +198,6 @@ async fn handle_command(
                 bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
             }
         }
-        /*Command::Image => {
-            if let Some(state) = dialogue.get().await? {
-                if let State::Game { state: conv_state } = state {
-                    if let Some(last_msg) = conv_state.recent.iter().rev().find(|m| m.role == "model" && !m.parts[0].text.starts_with("[Résumé")) {
-                        if let Ok(story) = serde_json::from_str::<gemini::StoryResponse>(&last_msg.parts[0].text) {
-                            let prompt = if !story.image_prompt.is_empty() {
-                                story.image_prompt.clone()
-                            } else {
-                                format!(
-                                    "A grainy, retro 1990s television sci-fi series VHS screenshot of a male FBI agent in a suit and a female FBI agent with red bob hair. Foggy atmosphere, dark lighting, 35mm film grain. Scene: {}",
-                                    story.story_text.chars().take(200).collect::<String>()
-                                )
-                            };
-
-                            bot.send_message(msg.chat.id, "🖼 Génération d'une illustration pour cette scène...").await?;
-                            bot.send_chat_action(msg.chat.id, ChatAction::UploadPhoto).await?;
-
-                            match gemini::generate_image(&config.gemini_api_key, &prompt).await {
-                                Ok(image_bytes) => {
-                                    bot.send_photo(msg.chat.id, InputFile::memory(image_bytes)).await?;
-                                }
-                                Err(e) => {
-                                    log::error!("Erreur lors de la génération forcée : {}", e);
-                                    bot.send_message(
-                                        msg.chat.id,
-                                        "❌ Impossible de générer l'illustration. Les forces occultes ont bloqué l'image !",
-                                    ).await?;
-                                }
-                            }
-                        } else {
-                            bot.send_message(msg.chat.id, "Impossible de lire la scène courante.").await?;
-                        }
-                    } else {
-                        bot.send_message(msg.chat.id, "Aucune scène à illustrer pour le moment.").await?;
-                    }
-                } else {
-                    bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
-                }
-            } else {
-                bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
-            }
-        }*/
     }
     Ok(())
 }
@@ -237,7 +205,7 @@ async fn handle_command(
 async fn handle_game_state(
     bot: Bot,
     dialogue: MyDialogue,
-    state: gemini::ConversationState,
+    state: common::ConversationState,
     msg: Message,
     config: Config,
 ) -> HandlerResult {
@@ -257,24 +225,16 @@ async fn handle_game_state(
 
     let mut conv_state = state;
 
+    // --- Choix du modèle LLM ---
+    // Utilisation de Gemini (Commenté) :
     match gemini::generate_story(&config.gemini_api_key, &mut conv_state, text).await {
+
+    // Utilisation de Mistral :
+    //match mistral::generate_story(&config.mistral_api_key, &mut conv_state, text).await {
         Ok(story_response) => {
             dialogue.update(State::Game { state: conv_state }).await?;
 
             bot.send_message(msg.chat.id, &story_response.story_text).await?;
-/*
-            if story_response.should_generate_image {
-                bot.send_chat_action(msg.chat.id, ChatAction::UploadPhoto).await?;
-                log::info!("Génération d'une image avec le prompt: {}", story_response.image_prompt);
-                match gemini::generate_image(&config.gemini_api_key, &story_response.image_prompt).await {
-                    Ok(image_bytes) => {
-                        bot.send_photo(msg.chat.id, InputFile::memory(image_bytes)).await?;
-                    }
-                    Err(e) => {
-                        log::error!("Erreur lors de la génération d'image : {}", e);
-                    }
-                }
-            }*/
         }
         Err(e) => {
             log::error!("Erreur lors de la génération de l'histoire : {}", e);
@@ -286,4 +246,18 @@ async fn handle_game_state(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_command_parsing() {
+        let cmd = Command::parse("/start", "bot").unwrap();
+        assert_eq!(cmd, Command::Start("".to_string()));
+
+        let cmd = Command::parse("/start Nous sommes au pôle nord, il fait froid", "bot").unwrap();
+        assert_eq!(cmd, Command::Start("Nous sommes au pôle nord, il fait froid".to_string()));
+    }
 }

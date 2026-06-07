@@ -12,7 +12,7 @@ Le bot utilise l'API **Gemini 2.5 Flash** pour la narration (avec un schéma JSO
 - **Illustrations automatiques** : Lorsque la scène est très visuelle (ex: découverte d'un tableau de Freud dans les bois), le MJ génère automatiquement une image de style X-Files.
 - **Mode multijoueur (Groupes)** : Ajoutez le bot dans un groupe avec votre ami. Le bot maintient l'état de l'histoire pour le groupe entier, permettant de jouer à deux en prenant des tours.
 - **Commandes intégrées** :
-  - `/start` : Démarre une nouvelle enquête absurde.
+  - `/start [état initial]` : Démarre une nouvelle enquête absurde. Vous pouvez lui spécifier un état initial (ex : `/start Nous sommes au pôle nord, il fait froid`).
   - `/history` : Affiche l'historique complet de l'histoire générée.
   - `/image` : Force la génération d'une illustration pour la situation actuelle.
   - `/help` : Affiche l'aide et les commandes.
