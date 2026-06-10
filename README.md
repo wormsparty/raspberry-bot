@@ -2,18 +2,20 @@
 
 Ce projet est un exemple de bot Telegram codé en Rust qui permet de jouer à une aventure textuelle de type "AI Dungeon" en co-écriture avec un ami. L'histoire suit les agents Fox Mulder et Dana Scully dans des enquêtes humoristiques, absurdes et surréalistes (maisons marchantes, tableaux de Freud récurrents, etc.). 
 
-Le bot utilise l'API **Gemini** pour la narration (avec un schéma JSON structuré pour garantir un comportement fiable).
+Le bot utilise l'API **Gemini** ou **Mistral** pour la narration (avec un schéma JSON structuré pour garantir un comportement fiable). Le modèle peut être changé en cours de partie avec `/gemini` et `/mistral` ; ce choix est sauvegardé avec l'état du jeu et survit aux redémarrages.
 
 ---
 
 ## 🛠️ Fonctionnalités du Bot
 
-- **Narrateur interactif** : Gemini joue le rôle de Maître de Jeu (MJ) et décrit les conséquences absurdes de vos actions.
+- **Narrateur interactif** : le LLM joue le rôle de Maître de Jeu (MJ) et décrit les conséquences absurdes de vos actions.
 - **Mode multijoueur (Groupes)** : Ajoutez le bot dans un groupe avec votre ami. Le bot maintient l'état de l'histoire pour le groupe entier, permettant de jouer à deux en prenant des tours.
 - **Commandes intégrées** :
-  - `/start [état initial]` : Démarre une nouvelle enquête absurde. Vous pouvez lui spécifier un état initial (ex : `/start Nous sommes au pôle nord, il fait froid`).
-  - `/history` : Affiche l'historique complet de l'histoire générée.
+  - `/start [état initial]` : Démarre une nouvelle enquête absurde. Vous pouvez lui spécifier un état initial (ex : `/start Nous sommes au pôle nord, il fait froid`), par exemple obtenu via `/summary`.
+  - `/summary` : Génère un résumé complet de l'enquête, réutilisable comme état initial de `/start` (sur ce bot ou ailleurs).
+  - `/gemini` / `/mistral` : Change le modèle utilisé pour la suite de l'enquête (nécessite la clé API correspondante).
   - `/help` : Affiche l'aide et les commandes.
+  - Préfixez un message par `/ignore` pour parler aux autres joueurs sans que le bot ne réagisse.
 
 ---
 
@@ -28,14 +30,20 @@ Le bot utilise l'API **Gemini** pour la narration (avec un schéma JSON structur
 ## ⚙️ Configuration
 
 1. Clonez ou copiez ce dossier sur votre Raspberry Pi (ou machine de dev).
-2. Créez un fichier nommé `.env` à la racine du projet (`/home/mob/xfiles_bot/.env`) et ajoutez vos clés :
+2. Créez un fichier nommé `.env` à la racine du projet et ajoutez vos clés :
 
 ```env
 # Token Telegram (obtenu auprès de @BotFather)
 TELEGRAM_BOT_TOKEN=ton_token_telegram_ici
 
+# Modèle utilisé par défaut : "gemini" ou "mistral"
+MODEL_PROVIDER=gemini
+
 # Clé API Gemini (obtenue sur Google AI Studio)
 GEMINI_API_KEY=ta_cle_gemini_ici
+
+# Clé API Mistral (facultative, nécessaire pour /mistral)
+MISTRAL_API_KEY=ta_cle_mistral_ici
 
 # Niveau de log pour la console
 RUST_LOG=info
@@ -86,9 +94,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=mob
-WorkingDirectory=/home/mob/xfiles_bot
-ExecStart=/home/mob/xfiles_bot/target/release/xfiles_bot
+User=pi
+WorkingDirectory=/home/pi/xfiles_bot
+ExecStart=/home/pi/xfiles_bot/target/release/xfiles_bot
 Restart=always
 RestartSec=5
 
@@ -112,6 +120,8 @@ sudo journalctl -u xfiles-bot.service -f
 
 ## 🔍 Structure du Code
 
-- [Cargo.toml](file:///home/mob/xfiles_bot/Cargo.toml) : Gère les dépendances (Teloxide, Reqwest, Serde, Tokio).
-- [src/gemini.rs](file:///home/mob/xfiles_bot/src/gemini.rs) : Contient l'intégration avec les API REST de Gemini (génération de texte structuré JSON).
-- [src/main.rs](file:///home/mob/xfiles_bot/src/main.rs) : Contient la logique du bot Telegram, les gestionnaires de commandes, et la machine à états de dialogue.
+- [Cargo.toml](Cargo.toml) : Gère les dépendances (Teloxide, Reqwest, Serde, Tokio).
+- [src/common.rs](src/common.rs) : État de la conversation, consigne système, et orchestration partagée (résumé glissant, génération de l'histoire) indépendante du provider.
+- [src/gemini.rs](src/gemini.rs) : Adaptateur pour l'API REST de Gemini (génération de texte structuré JSON).
+- [src/mistral.rs](src/mistral.rs) : Adaptateur pour l'API REST de Mistral.
+- [src/main.rs](src/main.rs) : Contient la logique du bot Telegram, les gestionnaires de commandes, et la machine à états de dialogue.

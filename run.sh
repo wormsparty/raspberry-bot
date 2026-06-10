@@ -2,7 +2,7 @@
 
 if ! which rustup; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-        PATH="$PATH:~/.cargo/bin"
+        PATH="$PATH:$HOME/.cargo/bin"
 fi
 
 cargo build --release

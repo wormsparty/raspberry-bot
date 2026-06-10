@@ -22,7 +22,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=mob
+User=${SUDO_USER:-pi}
 WorkingDirectory=$BOT_DIR
 ExecStart=$EXEC_PATH
 Restart=always

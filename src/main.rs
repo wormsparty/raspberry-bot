@@ -7,11 +7,14 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use teloxide::dispatching::dialogue::{Dialogue, Storage};
 use teloxide::dispatching::UpdateHandler;
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ChatId, /*InputFile,*/ Message};
+use teloxide::types::{ChatAction, ChatId, Message};
 use teloxide::utils::command::BotCommands;
+
+use common::{Config, ModelProvider};
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub enum State {
@@ -22,18 +25,6 @@ pub enum State {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModelProvider {
-    Gemini,
-    Mistral,
-}
-
-#[derive(Clone)]
-pub struct Config {
-    pub provider: ModelProvider,
-    pub api_key: String,
-}
-
 #[derive(Clone)]
 pub struct FileStorage {
     dir: PathBuf,
@@ -41,7 +32,8 @@ pub struct FileStorage {
 
 impl FileStorage {
     pub fn new(dir: PathBuf) -> Self {
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|e| panic!("Impossible de créer le dossier de sessions {:?} : {}", dir, e));
         Self { dir }
     }
 
@@ -62,13 +54,19 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<Option<D>, Self::Error>> + Send + 'static>> {
         let path = self.path(chat_id);
         Box::pin(async move {
-            if !path.exists() {
-                return Ok(None);
+            let content = match tokio::fs::read(&path).await {
+                Ok(content) => content,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            match serde_json::from_slice(&content) {
+                Ok(dialogue) => Ok(Some(dialogue)),
+                Err(e) => {
+                    // Session corrompue : on repart de zéro plutôt que de bloquer le chat
+                    log::warn!("Session illisible ({}), réinitialisation : {}", path.display(), e);
+                    Ok(None)
+                }
             }
-            let content = tokio::fs::read(&path).await?;
-            let dialogue = serde_json::from_slice(&content)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            Ok(Some(dialogue))
         })
     }
 
@@ -81,7 +79,11 @@ where
         Box::pin(async move {
             let content = serde_json::to_vec(&dialogue)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            tokio::fs::write(&path, content).await?;
+            // Écriture atomique : fichier temporaire puis rename, pour ne jamais
+            // laisser un JSON tronqué si le process meurt en pleine écriture
+            let tmp_path = path.with_extension("json.tmp");
+            tokio::fs::write(&tmp_path, content).await?;
+            tokio::fs::rename(&tmp_path, &path).await?;
             Ok(())
         })
     }
@@ -92,10 +94,11 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'static>> {
         let path = self.path(chat_id);
         Box::pin(async move {
-            if path.exists() {
-                tokio::fs::remove_file(&path).await?;
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
             }
-            Ok(())
         })
     }
 }
@@ -108,14 +111,14 @@ type HandlerResult = Result<(), Box<dyn Error + Send + Sync>>;
 enum Command {
     #[command(description = "Commencer une nouvelle enquête.")]
     Start(String),
-    #[command(description = "Réinitialiser l'enquête.")]
-    Restart(String),
     #[command(description = "Afficher l'aide.")]
     Help,
-    #[command(description = "Afficher l'historique de l'enquête.")]
-    History,
     #[command(description = "Obtenir un résumé complet de l'histoire pour la reprendre ailleurs.")]
     Summary,
+    #[command(description = "Utiliser le modèle Gemini pour la suite de l'enquête.")]
+    Gemini,
+    #[command(description = "Utiliser le modèle Mistral pour la suite de l'enquête.")]
+    Mistral,
 }
 
 #[tokio::main]
@@ -124,19 +127,17 @@ async fn main() {
     pretty_env_logger::init();
     log::info!("Démarrage du bot X-Files...");
 
-    if std::env::var("TELOXIDE_TOKEN").is_err() {
-        if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
-            // SAFETY: single-threaded initialization before tokio runtime starts
-            unsafe { std::env::set_var("TELOXIDE_TOKEN", token) };
-        }
-    }
+    let token = std::env::var("TELOXIDE_TOKEN")
+        .or_else(|_| std::env::var("TELEGRAM_BOT_TOKEN"))
+        .expect("TELOXIDE_TOKEN ou TELEGRAM_BOT_TOKEN doit être défini dans l'environnement ou le fichier .env");
+    let bot = Bot::new(token);
 
-    // --- Configuration du Modèle et de l'API Key ---
+    // --- Configuration du Modèle et des API Keys ---
     let provider_str = std::env::var("MODEL_PROVIDER")
         .unwrap_or_else(|_| "gemini".to_string())
         .to_lowercase();
 
-    let provider = match provider_str.as_str() {
+    let default_provider = match provider_str.as_str() {
         "gemini" => ModelProvider::Gemini,
         "mistral" => ModelProvider::Mistral,
         other => {
@@ -144,18 +145,23 @@ async fn main() {
         }
     };
 
-    let api_key = match provider {
-        ModelProvider::Gemini => std::env::var("GEMINI_API_KEY")
-            .expect("GEMINI_API_KEY doit être défini dans l'environnement ou le fichier .env pour utiliser Gemini"),
-        ModelProvider::Mistral => std::env::var("MISTRAL_API_KEY")
-            .expect("MISTRAL_API_KEY doit être défini dans l'environnement ou le fichier .env pour utiliser Mistral"),
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .expect("Impossible de construire le client HTTP");
+
+    let config = Config {
+        client,
+        default_provider,
+        gemini_key: std::env::var("GEMINI_API_KEY").ok(),
+        mistral_key: std::env::var("MISTRAL_API_KEY").ok(),
     };
 
-    let bot = Bot::from_env();
-    let config = Config {
-        provider,
-        api_key,
-    };
+    // La clé du provider par défaut est indispensable ; les autres sont
+    // optionnelles (elles ne servent qu'en cas de bascule via /gemini ou /mistral)
+    if let Err(e) = config.key_for(default_provider) {
+        panic!("{}", e);
+    }
 
     let mut dispatcher = Dispatcher::builder(bot, schema())
         .dependencies(dptree::deps![Arc::new(FileStorage::new(std::path::PathBuf::from("sessions"))), config])
@@ -171,6 +177,8 @@ fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
     let message_handler = Update::filter_message()
         .chain(dptree::filter(|msg: Message| {
             if let Some(text) = msg.text() {
+                // /ignore permet de parler aux autres joueurs du chat sans que
+                // le message ne soit interprété comme une action du jeu
                 !text.starts_with("/ignore")
             } else {
                 true
@@ -204,11 +212,20 @@ async fn handle_command(
     config: Config,
 ) -> HandlerResult {
     match cmd {
-        Command::Start(initial_state) | Command::Restart(initial_state) => {
+        Command::Start(initial_state) => {
             bot.send_message(msg.chat.id, "🛸 Initialisation d'une nouvelle enquête pour Mulder et Scully...").await?;
             bot.send_chat_action(msg.chat.id, ChatAction::Typing).await?;
 
-            let mut conv_state = common::ConversationState::default();
+            // Conserver le modèle choisi lors d'une éventuelle enquête précédente
+            let previous_provider = match dialogue.get().await? {
+                Some(State::Game { state }) => state.provider,
+                _ => None,
+            };
+            let mut conv_state = common::ConversationState {
+                provider: previous_provider,
+                ..Default::default()
+            };
+
             let start_msg = if initial_state.trim().is_empty() {
                 "Commence une nouvelle enquête de Mulder et Scully.".to_string()
             } else {
@@ -218,13 +235,7 @@ async fn handle_command(
                 )
             };
 
-            // --- Choix du modèle LLM ---
-            let story_result = match config.provider {
-                ModelProvider::Gemini => gemini::generate_story(&config.api_key, &mut conv_state, &start_msg).await,
-                ModelProvider::Mistral => mistral::generate_story(&config.api_key, &mut conv_state, &start_msg).await,
-            };
-
-            match story_result {
+            match common::generate_story(&config, &mut conv_state, &start_msg).await {
                 Ok(story_response) => {
                     dialogue.update(State::Game { state: conv_state }).await?;
 
@@ -240,94 +251,64 @@ async fn handle_command(
             }
         }
         Command::Help => {
-            let help_text = "🕵️‍♂️ **Bienvenue dans l'X-Files Generator !** 🕵️‍♀️\n\n\
+            let help_text = "🕵️ Bienvenue dans l'X-Files Generator ! 🕵️\n\n\
                              Vous co-écrivez une enquête avec Mulder et Scully.\n\n\
-                             **Comment jouer :**\n\
-                             - Écrivez simplement ce que font ou disent nos deux agents (ex: 'Mulder fouille la poubelle').\n\
-                             - Le Maître de Jeu décrira les rebondissements de l'histoire.\n\n\
-                             **Commandes :**\n\
+                             Comment jouer :\n\
+                             - Écrivez simplement ce que font ou disent nos deux agents (ex: « Mulder fouille la poubelle »).\n\
+                             - Le Maître de Jeu décrira les rebondissements de l'histoire.\n\
+                             - Préfixez un message par /ignore pour parler aux autres joueurs sans que le bot ne réagisse.\n\n\
+                             Commandes :\n\
                              /start [état] - Commencer une nouvelle enquête avec un état initial facultatif\n\
-                             /restart [état] - Réinitialiser l'enquête avec un état initial facultatif\n\
                              /summary - Obtenir un résumé complet de l'histoire pour la reprendre ailleurs\n\
-                             /history - Relire le journal de l'enquête depuis le début\n\
+                             /gemini - Utiliser le modèle Gemini pour la suite de l'enquête\n\
+                             /mistral - Utiliser le modèle Mistral pour la suite de l'enquête\n\
                              /help - Afficher ce message d'aide";
             bot.send_message(msg.chat.id, help_text).await?;
         }
-        Command::History => {
-            if let Some(state) = dialogue.get().await? {
-                if let State::Game { state: conv_state } = state {
-                    let mut chronicle = String::from("📖 **Journal de l'enquête :**\n\n");
+        Command::Summary => {
+            if let Some(State::Game { state: conv_state }) = dialogue.get().await? {
+                bot.send_chat_action(msg.chat.id, ChatAction::Typing).await?;
 
-                    if !conv_state.summary.is_empty() {
-                        chronicle.push_str(&format!("📋 _Résumé des événements passés : {}_\n\n---\n\n", conv_state.summary));
+                match common::get_story_summary(&config, &conv_state).await {
+                    Ok(summary) => {
+                        let reply = format!(
+                            "📋 Résumé de l'enquête actuelle (copiez-le comme état initial de /start) :\n\n{}",
+                            summary
+                        );
+                        bot.send_message(msg.chat.id, reply).await?;
                     }
-
-                    let mut has_entries = false;
-                    for msg_item in &conv_state.recent {
-                        if msg_item.role == "user" {
-                            if msg_item.parts[0].text == "Commence une nouvelle enquête de Mulder et Scully." {
-                                continue;
-                            }
-                            chronicle.push_str(&format!("👉 _Action : {}_\n\n", msg_item.parts[0].text));
-                            has_entries = true;
-                        } else if msg_item.role == "model" {
-                            // Ignorer le message de résumé injecté (commence par "[Résumé")
-                            if msg_item.parts[0].text.starts_with("[Résumé") {
-                                continue;
-                            }
-                            if let Ok(story) = serde_json::from_str::<common::StoryResponse>(&msg_item.parts[0].text) {
-                                chronicle.push_str(&format!("{}\n\n", story.story_text));
-                            } else {
-                                chronicle.push_str(&format!("{}\n\n", msg_item.parts[0].text));
-                            }
-                            has_entries = true;
-                        }
+                    Err(e) => {
+                        log::error!("Erreur lors de la génération du résumé : {}", e);
+                        bot.send_message(
+                            msg.chat.id,
+                            "👽 Impossible de générer le résumé. Réessayez !",
+                        ).await?;
                     }
-
-                    if has_entries || !conv_state.summary.is_empty() {
-                        bot.send_message(msg.chat.id, chronicle).await?;
-                    } else {
-                        bot.send_message(msg.chat.id, "L'histoire commence à peine. Envoyez votre première action !").await?;
-                    }
-                } else {
-                    bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
                 }
             } else {
                 bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
             }
         }
-        Command::Summary => {
-            if let Some(state) = dialogue.get().await? {
-                if let State::Game { state: conv_state } = state {
-                    bot.send_chat_action(msg.chat.id, ChatAction::Typing).await?;
-                    
-                    // --- Choix du modèle LLM ---
-                    let summary_result = match config.provider {
-                        ModelProvider::Gemini => gemini::get_story_summary(&config.api_key, &conv_state).await,
-                        ModelProvider::Mistral => mistral::get_story_summary(&config.api_key, &conv_state).await,
-                    };
+        Command::Gemini | Command::Mistral => {
+            let provider = match cmd {
+                Command::Gemini => ModelProvider::Gemini,
+                _ => ModelProvider::Mistral,
+            };
 
-                    match summary_result {
-                        Ok(summary) => {
-                            let reply = format!(
-                                "📋 **Résumé de l'enquête actuelle (prêt à être copié pour /start ou /restart) :**\n\n```\n{}\n```",
-                                summary
-                            );
-                            bot.send_message(msg.chat.id, reply).await?;
-                        }
-                        Err(e) => {
-                            log::error!("Erreur lors de la génération du résumé : {}", e);
-                            bot.send_message(
-                                msg.chat.id,
-                                "👽 Impossible de générer le résumé. Réessayez !",
-                            ).await?;
-                        }
-                    }
-                } else {
-                    bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
-                }
+            if let Err(e) = config.key_for(provider) {
+                bot.send_message(msg.chat.id, format!("⚠️ {}", e)).await?;
+            } else if let Some(State::Game { state: mut conv_state }) = dialogue.get().await? {
+                conv_state.provider = Some(provider);
+                dialogue.update(State::Game { state: conv_state }).await?;
+                bot.send_message(
+                    msg.chat.id,
+                    format!("🛸 Modèle changé : la suite de l'enquête sera générée par {}.", provider),
+                ).await?;
             } else {
-                bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
+                bot.send_message(
+                    msg.chat.id,
+                    "Aucune enquête en cours. Lancez /start, puis choisissez le modèle avec /gemini ou /mistral.",
+                ).await?;
             }
         }
     }
@@ -367,13 +348,7 @@ async fn handle_game_state(
 
     let mut conv_state = state;
 
-    // --- Choix du modèle LLM ---
-    let story_result = match config.provider {
-        ModelProvider::Gemini => gemini::generate_story(&config.api_key, &mut conv_state, text).await,
-        ModelProvider::Mistral => mistral::generate_story(&config.api_key, &mut conv_state, text).await,
-    };
-
-    match story_result {
+    match common::generate_story(&config, &mut conv_state, text).await {
         Ok(story_response) => {
             dialogue.update(State::Game { state: conv_state }).await?;
 
@@ -403,14 +378,13 @@ mod tests {
         let cmd = Command::parse("/start Nous sommes au pôle nord, il fait froid", "bot").unwrap();
         assert_eq!(cmd, Command::Start("Nous sommes au pôle nord, il fait froid".to_string()));
 
-        let cmd = Command::parse("/restart", "bot").unwrap();
-        assert_eq!(cmd, Command::Restart("".to_string()));
-
-        let cmd = Command::parse("/restart Nous sommes au pôle nord, il fait froid", "bot").unwrap();
-        assert_eq!(cmd, Command::Restart("Nous sommes au pôle nord, il fait froid".to_string()));
-
         let cmd = Command::parse("/summary", "bot").unwrap();
         assert_eq!(cmd, Command::Summary);
+
+        let cmd = Command::parse("/gemini", "bot").unwrap();
+        assert_eq!(cmd, Command::Gemini);
+
+        let cmd = Command::parse("/mistral", "bot").unwrap();
+        assert_eq!(cmd, Command::Mistral);
     }
 }
-
