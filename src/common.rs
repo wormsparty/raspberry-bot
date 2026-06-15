@@ -100,8 +100,8 @@ impl ConversationState {
     }
 }
 
-pub const MAX_RECENT_TURNS: usize = 6; // 3 échanges user/model
-pub const SUMMARY_TRIGGER: usize = MAX_RECENT_TURNS; // résumé quand on dépasse
+pub const MAX_RECENT_TURNS: usize = 6; // nombre de messages à conserver après résumé
+pub const SUMMARY_TRIGGER: usize = MAX_RECENT_TURNS * 2; // résumé quand on dépasse 12 messages
 
 pub const STORY_TEMPERATURE: f32 = 0.9;
 pub const SUMMARY_TEMPERATURE: f32 = 0.3;
@@ -242,7 +242,7 @@ pub async fn generate_story(
 
     // 2. Si trop de tours, résumer les anciens et ne garder que les récents
     if state.recent.len() > SUMMARY_TRIGGER {
-        let split_at = state.recent.len() - MAX_RECENT_TURNS / 2;
+        let split_at = state.recent.len() - MAX_RECENT_TURNS;
         let to_summarize = state.recent[..split_at].to_vec();
         let kept = state.recent[split_at..].to_vec();
 

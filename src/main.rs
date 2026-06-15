@@ -161,10 +161,16 @@ async fn main() {
         openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
     };
 
-    // La clé du provider par défaut est indispensable ; les autres sont
-    // optionnelles (elles ne servent qu'en cas de bascule via /gemini ou /mistral)
+    // La clé du provider par défaut est indispensable ; les autres sont optionnelles.
     if let Err(e) = config.key_for(default_provider) {
         panic!("{}", e);
+    }
+
+    // Valider ADMIN_USER_ID au démarrage pour détecter les fautes de frappe immédiatement.
+    if let Ok(raw) = std::env::var("ADMIN_USER_ID") {
+        if raw.parse::<u64>().is_err() {
+            panic!("ADMIN_USER_ID='{}' n'est pas un entier u64 valide — corrigez le fichier .env", raw);
+        }
     }
 
     let mut dispatcher = Dispatcher::builder(bot, schema())
@@ -244,7 +250,7 @@ fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
             if let Some(text) = msg.text() {
                 // /ignore permet de parler aux autres joueurs du chat sans que
                 // le message ne soit interprété comme une action du jeu
-                !text.starts_with("/ignore")
+                !text.starts_with("/ignore") && !text.starts_with("/i ")
             } else {
                 true
             }
@@ -324,7 +330,7 @@ async fn handle_command(
                              - Tapez /start pour lancer une nouvelle mission. Le Narrateur vous demandera votre grade, le nom de votre vaisseau et l'époque choisie.\n\
                              - Décrivez ensuite vos actions librement ou choisissez parmi les options proposées.\n\
                              - Le Narrateur gère un système de dés (d20) pour les actions à enjeu : combats, négociations, manœuvres critiques...\n\
-                             - Préfixez un message par /ignore pour parler aux autres joueurs sans que le bot ne réagisse.\n\n\
+                             - Préfixez un message par /ignore (ou /i) pour parler aux autres joueurs sans que le bot ne réagisse.\n\n\
                              Commandes :\n\
                              /start [état] - Commencer une nouvelle mission avec un état initial facultatif\n\
                              /summary - Obtenir un résumé complet de la mission pour la reprendre ailleurs\n\
@@ -359,7 +365,8 @@ async fn handle_command(
             }
         }
         Command::Model(model_name) => {
-            let provider = match model_name.trim().to_lowercase().as_str() {
+            let model_word = model_name.split_whitespace().next().unwrap_or("").to_lowercase();
+            let provider = match model_word.as_str() {
                 "gemini" => ModelProvider::Gemini,
                 "mistral" => ModelProvider::Mistral,
                 _ => {
@@ -439,20 +446,20 @@ async fn handle_deploy(bot: &Bot, msg: &Message, args: &str) -> HandlerResult {
 
     let force = args == "-y";
 
-    // Étape 1 : git diff
+    // Étape 1 : vérifier l'état du dépôt (staged + unstaged)
     if !force {
-        let diff = tokio::process::Command::new("/usr/bin/git")
-            .args(["diff", "--stat"])
+        let status = tokio::process::Command::new("/usr/bin/git")
+            .args(["status", "--porcelain"])
             .output()
             .await
             .map_err(|e| format!("Impossible de lancer git : {}", e))?;
 
-        if !diff.stdout.is_empty() {
-            let stat = String::from_utf8_lossy(&diff.stdout);
+        if !status.stdout.trim_ascii().is_empty() {
+            let stat = String::from_utf8_lossy(&status.stdout);
             bot.send_message(
                 msg.chat.id,
                 format!(
-                    "⚠️ Des modifications locales non commitées existent :\n\n{}\n\nUtilisez /deploy -y pour déployer quand même.",
+                    "⚠️ Des modifications locales existent (non commitées ou stagées) :\n\n{}\n\nUtilisez /deploy -y pour déployer quand même.",
                     stat.trim()
                 ),
             )
@@ -516,32 +523,48 @@ async fn handle_deploy(bot: &Bot, msg: &Message, args: &str) -> HandlerResult {
     )
     .await?;
 
-    // On spawn pour laisser le temps à Telegram de recevoir le message avant que le process meure
-    tokio::spawn(async {
+    // On spawn pour laisser le temps à Telegram de recevoir le message avant que le process meure.
+    // Si le restart échoue (process toujours vivant), on notifie l'admin.
+    let bot_clone = bot.clone();
+    let chat_id = msg.chat.id;
+    tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let _ = tokio::process::Command::new("sudo")
+        match tokio::process::Command::new("/usr/bin/sudo")
             .args(["systemctl", "restart", "xfiles-bot"])
             .output()
-            .await;
+            .await
+        {
+            Err(e) => {
+                log::error!("Impossible de lancer sudo systemctl restart : {}", e);
+                let _ = bot_clone.send_message(chat_id, format!("❌ Redémarrage impossible : {}", e)).await;
+            }
+            Ok(out) if !out.status.success() => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                log::error!("systemctl restart a échoué : {}", err);
+                let _ = bot_clone
+                    .send_message(chat_id, format!("❌ Redémarrage échoué :\n{}", truncate_tail(&err, 1000)))
+                    .await;
+            }
+            Ok(_) => {} // succès → le process meurt, rien à envoyer
+        }
     });
 
     Ok(())
 }
 
 fn truncate_tail(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
+    let indices: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+    if indices.len() <= max_chars {
         return s.to_string();
     }
-    let start = s.char_indices().nth(s.chars().count() - max_chars).map(|(i, _)| i).unwrap_or(0);
-    format!("[...]\n{}", &s[start..])
+    format!("[...]\n{}", &s[indices[indices.len() - max_chars]..])
 }
 
 fn truncate_head(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
+    match s.char_indices().nth(max_chars) {
+        None => s.to_string(),
+        Some((end, _)) => format!("{}\n[...]", &s[..end]),
     }
-    let end = s.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(s.len());
-    format!("{}\n[...]", &s[..end])
 }
 
 async fn handle_game_state(

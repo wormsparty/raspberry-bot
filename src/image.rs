@@ -64,8 +64,7 @@ pub async fn generate_scene_image(
     // Fallback : content est une data URI directement dans la chaîne
     if let Some(text) = content.as_str() {
         if text.starts_with("data:image/") {
-            let b64_part = text.splitn(2, ',').nth(1).unwrap_or("");
-            return Ok(base64::engine::general_purpose::STANDARD.decode(b64_part)?);
+            return extract_image_bytes(client, text).await;
         }
     }
 
@@ -76,10 +75,16 @@ pub async fn generate_scene_image(
 async fn extract_image_bytes(client: &reqwest::Client, url: &str) -> ApiResult<Vec<u8>> {
     // Data URI inline
     if let Some(stripped) = url.strip_prefix("data:image/") {
-        let b64_part = stripped.splitn(2, ',').nth(1).unwrap_or("");
+        let b64_part = stripped
+            .splitn(2, ',')
+            .nth(1)
+            .ok_or("Data URI malformée : payload base64 absent")?;
         return Ok(base64::engine::general_purpose::STANDARD.decode(b64_part)?);
     }
-    // URL HTTP distante
+    // Sécurité SSRF : on n'accepte que les URLs HTTPS
+    if !url.starts_with("https://") {
+        return Err(format!("URL image rejetée (schéma non autorisé) : {}", url).into());
+    }
     let bytes = client.get(url).send().await?.bytes().await?;
     Ok(bytes.to_vec())
 }

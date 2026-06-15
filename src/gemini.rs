@@ -31,10 +31,14 @@ async fn call(
     }
 
     let response_json: serde_json::Value = response.json().await?;
-    let text = response_json["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .ok_or("Failed to extract text from Gemini response")?
-        .to_string();
+    let text = match response_json["candidates"][0]["content"]["parts"][0]["text"].as_str() {
+        Some(t) => t.to_string(),
+        None => {
+            let body = serde_json::to_string(&response_json)
+                .unwrap_or_else(|_| format!("{:?}", response_json));
+            return Err(format!("Réponse Gemini inattendue (filtrage sécurité ou quota ?) : {}", body).into());
+        }
+    };
 
     Ok(text)
 }

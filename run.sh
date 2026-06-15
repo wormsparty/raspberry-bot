@@ -6,4 +6,4 @@ if ! which rustup; then
 fi
 
 cargo build --release
-systemctl restart xfiles-bot
+sudo systemctl restart xfiles-bot
