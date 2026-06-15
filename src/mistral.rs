@@ -41,7 +41,7 @@ pub async fn complete_story(
 ) -> ApiResult<String> {
     // Mistral n'a pas de responseSchema : la contrainte JSON est ajoutée à la consigne système.
     let system_text = format!(
-        "{}\n\nIMPORTANT: Tu dois impérativement répondre sous la forme d'un objet JSON contenant la clé suivante :\n- \"story_text\" (string) : Le texte décrivant la suite de l'histoire et les actions des personnages",
+        "{}\n\nIMPORTANT: Tu dois impérativement répondre sous la forme d'un objet JSON contenant les clés suivantes :\n- \"story_text\" (string) : Le texte décrivant la suite de l'histoire et les actions des personnages\n- \"scene_description\" (string) : Pour les scènes visuellement fortes uniquement, un prompt d'image génératif en ANGLAIS formatté pour un générateur IA (voir instructions IMAGE PROMPT). Sinon, chaîne vide \"\".",
         system_text
     );
 

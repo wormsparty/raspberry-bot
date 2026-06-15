@@ -59,9 +59,13 @@ pub async fn complete_story(
                     "story_text": {
                         "type": "string",
                         "description": "Le texte décrivant la suite de l'histoire et les actions des personnages"
+                    },
+                    "scene_description": {
+                        "type": "string",
+                        "description": "English image generation prompt for visually striking scenes only; empty string otherwise"
                     }
                 },
-                "required": ["story_text"]
+                "required": ["story_text", "scene_description"]
             },
             "temperature": STORY_TEMPERATURE
         }

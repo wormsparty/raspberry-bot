@@ -1,5 +1,6 @@
 mod common;
 mod gemini;
+mod image;
 mod mistral;
 
 use std::error::Error;
@@ -11,7 +12,7 @@ use std::time::Duration;
 use teloxide::dispatching::dialogue::{Dialogue, Storage};
 use teloxide::dispatching::UpdateHandler;
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ChatId, Message};
+use teloxide::types::{ChatAction, ChatId, InputFile, Message};
 use teloxide::utils::command::BotCommands;
 
 use common::{Config, ModelProvider};
@@ -115,10 +116,10 @@ enum Command {
     Help,
     #[command(description = "Obtenir un résumé complet de la mission pour la reprendre ailleurs.")]
     Summary,
-    #[command(description = "Utiliser le modèle Gemini pour la suite de la mission.")]
-    Gemini,
-    #[command(description = "Utiliser le modèle Mistral pour la suite de la mission.")]
-    Mistral,
+    #[command(description = "Choisir le modèle IA : /model gemini ou /model mistral.")]
+    Model(String),
+    #[command(description = "Activer ou désactiver la génération d'images : /image on ou /image off.")]
+    Image(String),
     #[command(description = "Déployer la dernière version du bot (admin seulement). Ajouter -y pour ignorer les modifications locales.")]
     Deploy(String),
 }
@@ -157,6 +158,7 @@ async fn main() {
         default_provider,
         gemini_key: std::env::var("GEMINI_API_KEY").ok(),
         mistral_key: std::env::var("MISTRAL_API_KEY").ok(),
+        openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
     };
 
     // La clé du provider par défaut est indispensable ; les autres sont
@@ -171,6 +173,67 @@ async fn main() {
         .build();
 
     dispatcher.dispatch().await;
+}
+
+static HOLODECK_ERRORS: &[&str] = &[
+    "⚠️ *Perturbation ionique détectée.* Les capteurs de visualisation du pont sont temporairement hors ligne. Continuez la mission, Commandant.",
+    "⚠️ *Holodeck en maintenance d'urgence.* La projection visuelle de la scène ne peut être affichée pour le moment. L'ingénieur en chef s'en occupe.",
+    "⚠️ *Communications interstellaires dégradées.* Les satellites d'imagerie subspaciale ne répondent plus. La mission continue sans relais visuel.",
+    "⚠️ *Matrice holoémettrice surchargée.* Le système de visualisation a besoin de 47 secondes pour se recalibrer. Restez en alerte.",
+    "⚠️ *Quota de transfert subspacial atteint.* La bande passante de la communication visuelle est saturée. Reprise dans le prochain quadrant.",
+];
+
+const HOLODECK_BUDGET_ERROR: &str = "⚠️ *Alerte du Département des Finances de la Flotte Stellaire !* \
+    Nos réserves de latinum numérique sont épuisées — le Quartier Général a suspendu les transmissions holoémetteurs. \
+    La Flotte doit recharger ses crédits de communication subspaciale avant de pouvoir reprendre les projections visuelles. \
+    La mission continue sans relais visuel pour le moment, Commandant.";
+
+fn holodeck_error_message(err: &dyn std::fmt::Display) -> &'static str {
+    let err_str = err.to_string();
+    log::warn!("Erreur génération image : {}", err_str);
+    if err_str.contains("402") {
+        return HOLODECK_BUDGET_ERROR;
+    }
+    let idx = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0)
+        % HOLODECK_ERRORS.len();
+    HOLODECK_ERRORS[idx]
+}
+
+async fn maybe_send_image(
+    bot: &Bot,
+    chat_id: ChatId,
+    config: &Config,
+    image_enabled: bool,
+    scene_description: &str,
+) {
+    if !image_enabled || scene_description.is_empty() {
+        return;
+    }
+    let key = match &config.openrouter_key {
+        Some(k) => k.clone(),
+        None => return,
+    };
+
+    if let Err(e) = bot.send_chat_action(chat_id, ChatAction::UploadPhoto).await {
+        log::warn!("Impossible d'envoyer l'action upload_photo : {}", e);
+    }
+
+    match image::generate_scene_image(&config.client, &key, scene_description).await {
+        Ok(bytes) => {
+            if let Err(e) = bot.send_photo(chat_id, InputFile::memory(bytes)).await {
+                log::error!("Impossible d'envoyer la photo Telegram : {}", e);
+            }
+        }
+        Err(e) => {
+            let msg = holodeck_error_message(e.as_ref());
+            if let Err(send_err) = bot.send_message(chat_id, msg).await {
+                log::error!("Impossible d'envoyer le message d'erreur holodeck : {}", send_err);
+            }
+        }
+    }
 }
 
 fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
@@ -218,13 +281,14 @@ async fn handle_command(
             bot.send_message(msg.chat.id, "🖖 Initialisation d'une nouvelle mission dans l'univers Star Trek...").await?;
             bot.send_chat_action(msg.chat.id, ChatAction::Typing).await?;
 
-            // Conserver le modèle choisi lors d'une éventuelle enquête précédente
-            let previous_provider = match dialogue.get().await? {
-                Some(State::Game { state }) => state.provider,
-                _ => None,
+            // Conserver le modèle et les préférences d'image de la session précédente
+            let (previous_provider, previous_image_enabled) = match dialogue.get().await? {
+                Some(State::Game { state }) => (state.provider, state.image_enabled),
+                _ => (None, true),
             };
             let mut conv_state = common::ConversationState {
                 provider: previous_provider,
+                image_enabled: previous_image_enabled,
                 ..Default::default()
             };
 
@@ -239,9 +303,10 @@ async fn handle_command(
 
             match common::generate_story(&config, &mut conv_state, &start_msg).await {
                 Ok(story_response) => {
+                    let image_enabled = conv_state.image_enabled;
                     dialogue.update(State::Game { state: conv_state }).await?;
-
                     bot.send_message(msg.chat.id, &story_response.story_text).await?;
+                    maybe_send_image(&bot, msg.chat.id, &config, image_enabled, &story_response.scene_description).await;
                 }
                 Err(e) => {
                     log::error!("Erreur lors du démarrage du jeu : {}", e);
@@ -263,8 +328,8 @@ async fn handle_command(
                              Commandes :\n\
                              /start [état] - Commencer une nouvelle mission avec un état initial facultatif\n\
                              /summary - Obtenir un résumé complet de la mission pour la reprendre ailleurs\n\
-                             /gemini - Utiliser le modèle Gemini pour la suite de la mission\n\
-                             /mistral - Utiliser le modèle Mistral pour la suite de la mission\n\
+                             /model gemini|mistral - Choisir le modèle IA pour la suite de la mission\n\
+                             /image on|off - Activer ou désactiver la génération d'images\n\
                              /deploy [-y] - Déployer la dernière version (admin) ; -y pour ignorer les modifications locales\n\
                              /help - Afficher ce message d'aide";
             bot.send_message(msg.chat.id, help_text).await?;
@@ -293,10 +358,14 @@ async fn handle_command(
                 bot.send_message(msg.chat.id, "Aucune mission en cours. Tapez /start pour commencer !").await?;
             }
         }
-        Command::Gemini | Command::Mistral => {
-            let provider = match cmd {
-                Command::Gemini => ModelProvider::Gemini,
-                _ => ModelProvider::Mistral,
+        Command::Model(model_name) => {
+            let provider = match model_name.trim().to_lowercase().as_str() {
+                "gemini" => ModelProvider::Gemini,
+                "mistral" => ModelProvider::Mistral,
+                _ => {
+                    bot.send_message(msg.chat.id, "⚠️ Modèle inconnu. Utilisez /model gemini ou /model mistral.").await?;
+                    return Ok(());
+                }
             };
 
             if let Err(e) = config.key_for(provider) {
@@ -311,7 +380,29 @@ async fn handle_command(
             } else {
                 bot.send_message(
                     msg.chat.id,
-                    "Aucune mission en cours. Lancez /start, puis choisissez le modèle avec /gemini ou /mistral.",
+                    "Aucune mission en cours. Lancez /start, puis choisissez le modèle avec /model gemini ou /model mistral.",
+                ).await?;
+            }
+        }
+        Command::Image(arg) => {
+            let enabled = match arg.trim().to_lowercase().as_str() {
+                "on" => true,
+                "off" => false,
+                _ => {
+                    bot.send_message(msg.chat.id, "⚠️ Utilisez /image on ou /image off.").await?;
+                    return Ok(());
+                }
+            };
+
+            if let Some(State::Game { state: mut conv_state }) = dialogue.get().await? {
+                conv_state.image_enabled = enabled;
+                dialogue.update(State::Game { state: conv_state }).await?;
+                let status = if enabled { "activée" } else { "désactivée" };
+                bot.send_message(msg.chat.id, format!("🖖 Génération d'images {} pour cette mission.", status)).await?;
+            } else {
+                bot.send_message(
+                    msg.chat.id,
+                    "Aucune mission en cours. Lancez /start, puis utilisez /image on ou /image off.",
                 ).await?;
             }
         }
@@ -488,9 +579,10 @@ async fn handle_game_state(
 
     match common::generate_story(&config, &mut conv_state, text).await {
         Ok(story_response) => {
+            let image_enabled = conv_state.image_enabled;
             dialogue.update(State::Game { state: conv_state }).await?;
-
             bot.send_message(msg.chat.id, &story_response.story_text).await?;
+            maybe_send_image(&bot, msg.chat.id, &config, image_enabled, &story_response.scene_description).await;
         }
         Err(e) => {
             log::error!("Erreur lors de la génération de l'histoire : {}", e);
@@ -519,10 +611,10 @@ mod tests {
         let cmd = Command::parse("/summary", "bot").unwrap();
         assert_eq!(cmd, Command::Summary);
 
-        let cmd = Command::parse("/gemini", "bot").unwrap();
-        assert_eq!(cmd, Command::Gemini);
+        let cmd = Command::parse("/model gemini", "bot").unwrap();
+        assert_eq!(cmd, Command::Model("gemini".to_string()));
 
-        let cmd = Command::parse("/mistral", "bot").unwrap();
-        assert_eq!(cmd, Command::Mistral);
+        let cmd = Command::parse("/model mistral", "bot").unwrap();
+        assert_eq!(cmd, Command::Model("mistral".to_string()));
     }
 }

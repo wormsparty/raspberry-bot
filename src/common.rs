@@ -25,6 +25,7 @@ pub struct Config {
     pub default_provider: ModelProvider,
     pub gemini_key: Option<String>,
     pub mistral_key: Option<String>,
+    pub openrouter_key: Option<String>,
 }
 
 impl Config {
@@ -61,17 +62,36 @@ pub struct Part {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StoryResponse {
     pub story_text: String,
+    #[serde(default)]
+    pub scene_description: String,
+}
+
+fn default_image_enabled() -> bool {
+    true
 }
 
 // Structure pour gérer l'état de la conversation.
-// `provider` est sérialisé avec le reste de l'état du jeu : un changement via
-// /gemini ou /mistral survit donc à un redémarrage du service.
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+// `provider` et `image_enabled` sont sérialisés avec l'état du jeu : les
+// changements via /model et /image survivent donc à un redémarrage du service.
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConversationState {
     #[serde(default)]
     pub provider: Option<ModelProvider>,
+    #[serde(default = "default_image_enabled")]
+    pub image_enabled: bool,
     pub summary: String,
     pub recent: Vec<MessageContent>,
+}
+
+impl Default for ConversationState {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            image_enabled: true,
+            summary: String::new(),
+            recent: Vec::new(),
+        }
+    }
 }
 
 impl ConversationState {
@@ -123,6 +143,17 @@ Sur un 1 naturel, un événement imprévu s'impose : trahison, panne critique, i
 
 DÉBUT DE PARTIE
 Au lancement, tu demandes au joueur ces trois informations : son grade et son rôle (Commandant, Officier Science, Ingénieur, Médecin, etc.), le nom de son vaisseau et sa classe, et l'époque choisie (23e ou 24e siècle). Puis tu génères une situation de départ tendue et originale. La partie commence dès que le joueur a répondu.
+
+IMAGE PROMPT (champ scene_description, optionnel — en ANGLAIS uniquement)
+PAR DÉFAUT, laisse scene_description VIDE (""). Ne génère une illustration QUE pour des moments visuellement exceptionnels et rares : une bataille spatiale intense, une confrontation physique dramatique, une créature alien spectaculaire, un lieu vraiment extraordinaire (monde alien saisissant, phénomène cosmique, épave colossale). Les échanges de dialogue, les choix narratifs, les moments d'exposition, les lancers de dé et les situations ordinaires à bord du vaisseau ne génèrent PAS d'image. En pratique, laisse le champ vide la grande majorité du temps — une image par aventure, voire moins.
+
+Quand le moment le justifie vraiment, remplis scene_description avec un prompt d'image génératif en anglais, optimisé pour un générateur de type Stable Diffusion / Imagen.
+
+Format du prompt (à respecter strictement, en anglais) :
+- Commence par décrire la scène visuellement : personnages (traits physiques, tenue, posture), décor (pont de vaisseau avec écrans holographiques et panneaux clignotants, planète alien, couloir métallique, etc.), action en cours.
+- N'utilise JAMAIS les mots "Star Trek", "Kirk", "Spock", "Enterprise" ni aucun nom de personnage ou de franchise.
+- Décris les personnages uniquement par leurs caractéristiques physiques (ex: "a bald human male in his 50s wearing a gray and gold command uniform", "a male officer with pointed ears and dark straight hair in blue science uniform").
+- Termine TOUJOURS par : "screenshot from a 1990s American science fiction TV show, 35mm film, studio lighting, practical sets, CRT screens, blinking control panels, cinematic, high production value"
 "#;
 
 impl ModelProvider {
@@ -286,8 +317,7 @@ mod tests {
     fn provider_roundtrips_with_state() {
         let state = ConversationState {
             provider: Some(ModelProvider::Mistral),
-            summary: String::new(),
-            recent: vec![turn("user", "action")],
+            ..Default::default()
         };
         let json = serde_json::to_string(&state).unwrap();
         let back: ConversationState = serde_json::from_str(&json).unwrap();
