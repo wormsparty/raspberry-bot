@@ -448,11 +448,18 @@ async fn handle_deploy(bot: &Bot, msg: &Message, args: &str) -> HandlerResult {
 
     // Étape 1 : vérifier l'état du dépôt (staged + unstaged)
     if !force {
-        let status = tokio::process::Command::new("/usr/bin/git")
+        let status = match tokio::process::Command::new("/usr/bin/git")
             .args(["status", "--porcelain"])
             .output()
             .await
-            .map_err(|e| format!("Impossible de lancer git : {}", e))?;
+        {
+            Ok(o) => o,
+            Err(e) => {
+                bot.send_message(msg.chat.id, format!("❌ Impossible de lancer git : {}", e))
+                    .await?;
+                return Ok(());
+            }
+        };
 
         if !status.stdout.trim_ascii().is_empty() {
             let stat = String::from_utf8_lossy(&status.stdout);
@@ -470,11 +477,18 @@ async fn handle_deploy(bot: &Bot, msg: &Message, args: &str) -> HandlerResult {
 
     // Étape 2 : git pull
     bot.send_message(msg.chat.id, "🔄 git pull en cours...").await?;
-    let pull = tokio::process::Command::new("/usr/bin/git")
+    let pull = match tokio::process::Command::new("/usr/bin/git")
         .args(["pull"])
         .output()
         .await
-        .map_err(|e| format!("Impossible de lancer git pull : {}", e))?;
+    {
+        Ok(o) => o,
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("❌ Impossible de lancer git pull : {}", e))
+                .await?;
+            return Ok(());
+        }
+    };
 
     if !pull.status.success() {
         let err = String::from_utf8_lossy(&pull.stderr);
@@ -497,11 +511,21 @@ async fn handle_deploy(bot: &Bot, msg: &Message, args: &str) -> HandlerResult {
     )
     .await?;
 
-    let build = tokio::process::Command::new("/home/mob/.cargo/bin/cargo")
+    let build = match tokio::process::Command::new("/home/mob/.cargo/bin/cargo")
         .args(["build", "--release"])
         .output()
         .await
-        .map_err(|e| format!("Impossible de lancer cargo : {}", e))?;
+    {
+        Ok(o) => o,
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("❌ Impossible de lancer cargo : {}\n\nVérifiez que le chemin `/home/mob/.cargo/bin/cargo` est correct.", e),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
 
     if !build.status.success() {
         let stderr = String::from_utf8_lossy(&build.stderr);
