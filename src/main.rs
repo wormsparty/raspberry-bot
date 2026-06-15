@@ -497,7 +497,7 @@ async fn handle_deploy(bot: &Bot, msg: &Message, args: &str) -> HandlerResult {
     )
     .await?;
 
-    let build = tokio::process::Command::new("/usr/bin/cargo")
+    let build = tokio::process::Command::new("/home/mob/.cargo/bin/cargo")
         .args(["build", "--release"])
         .output()
         .await
