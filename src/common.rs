@@ -151,8 +151,8 @@ Quand le moment le justifie vraiment, remplis scene_description avec un prompt d
 
 Format du prompt (à respecter strictement, en anglais) :
 - Commence par décrire la scène visuellement : personnages (traits physiques, tenue, posture), décor (pont de vaisseau avec écrans holographiques et panneaux clignotants, planète alien, couloir métallique, etc.), action en cours.
-- N'utilise JAMAIS les mots "Star Trek", "Kirk", "Spock", "Enterprise" ni aucun nom de personnage ou de franchise.
-- Décris les personnages uniquement par leurs caractéristiques physiques (ex: "a bald human male in his 50s wearing a gray and gold command uniform", "a male officer with pointed ears and dark straight hair in blue science uniform").
+- N'utilise JAMAIS les noms de franchises ou d'œuvres fictives ("Star Trek", "Enterprise", etc.) ni les noms de leurs personnages fictifs ("Kirk", "Spock", etc.). Décris ces personnages fictifs uniquement par leurs caractéristiques physiques (ex: "a bald human male in his 50s wearing a gray and gold command uniform", "a male officer with pointed ears and dark straight hair in blue science uniform").
+- En revanche, les personnages historiques réels (philosophes, peintres, musiciens, scientifiques, etc. comme Freud, Beethoven, Léonard de Vinci, Galilée…) peuvent et doivent être nommés directement — ce ne sont PAS des propriétés intellectuelles. Ne les paraphrase pas.
 - Termine TOUJOURS par : "screenshot from a 1990s American science fiction TV show, 35mm film, studio lighting, practical sets, CRT screens, blinking control panels, cinematic, high production value"
 "#;
 
