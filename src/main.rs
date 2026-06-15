@@ -107,17 +107,17 @@ type MyDialogue = Dialogue<State, FileStorage>;
 type HandlerResult = Result<(), Box<dyn Error + Send + Sync>>;
 
 #[derive(BotCommands, Clone, Debug, PartialEq)]
-#[command(rename_rule = "lowercase", description = "Commandes de l'enquête :")]
+#[command(rename_rule = "lowercase", description = "Commandes de la mission :")]
 enum Command {
-    #[command(description = "Commencer une nouvelle enquête.")]
+    #[command(description = "Commencer une nouvelle mission.")]
     Start(String),
     #[command(description = "Afficher l'aide.")]
     Help,
-    #[command(description = "Obtenir un résumé complet de l'histoire pour la reprendre ailleurs.")]
+    #[command(description = "Obtenir un résumé complet de la mission pour la reprendre ailleurs.")]
     Summary,
-    #[command(description = "Utiliser le modèle Gemini pour la suite de l'enquête.")]
+    #[command(description = "Utiliser le modèle Gemini pour la suite de la mission.")]
     Gemini,
-    #[command(description = "Utiliser le modèle Mistral pour la suite de l'enquête.")]
+    #[command(description = "Utiliser le modèle Mistral pour la suite de la mission.")]
     Mistral,
 }
 
@@ -125,7 +125,7 @@ enum Command {
 async fn main() {
     dotenvy::dotenv().ok();
     pretty_env_logger::init();
-    log::info!("Démarrage du bot X-Files...");
+    log::info!("Démarrage du bot Star Trek...");
 
     let token = std::env::var("TELOXIDE_TOKEN")
         .or_else(|_| std::env::var("TELEGRAM_BOT_TOKEN"))
@@ -198,7 +198,7 @@ fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
 async fn handle_start_state(bot: Bot, msg: Message) -> HandlerResult {
     bot.send_message(
         msg.chat.id,
-        "🛸 Aucune enquête n'est en cours.\n\nTapez /start pour commencer une aventure avec Mulder et Scully !",
+        "🖖 Aucune mission n'est en cours.\n\nTapez /start pour commencer une aventure dans l'univers Star Trek !",
     )
     .await?;
     Ok(())
@@ -213,7 +213,7 @@ async fn handle_command(
 ) -> HandlerResult {
     match cmd {
         Command::Start(initial_state) => {
-            bot.send_message(msg.chat.id, "🛸 Initialisation d'une nouvelle enquête pour Mulder et Scully...").await?;
+            bot.send_message(msg.chat.id, "🖖 Initialisation d'une nouvelle mission dans l'univers Star Trek...").await?;
             bot.send_chat_action(msg.chat.id, ChatAction::Typing).await?;
 
             // Conserver le modèle choisi lors d'une éventuelle enquête précédente
@@ -227,10 +227,10 @@ async fn handle_command(
             };
 
             let start_msg = if initial_state.trim().is_empty() {
-                "Commence une nouvelle enquête de Mulder et Scully.".to_string()
+                "Commence une nouvelle aventure dans l'univers Star Trek.".to_string()
             } else {
                 format!(
-                    "Commence une nouvelle enquête de Mulder et Scully. État initial : {}",
+                    "Commence une nouvelle aventure dans l'univers Star Trek. État initial : {}",
                     initial_state.trim()
                 )
             };
@@ -245,23 +245,24 @@ async fn handle_command(
                     log::error!("Erreur lors du démarrage du jeu : {}", e);
                     bot.send_message(
                         msg.chat.id,
-                        "👽 Les ondes cosmiques perturbent l'API (impossible de démarrer l'enquête). Réessayez !",
+                        "🖖 Les communications subspaciales sont perturbées (impossible de démarrer la mission). Réessayez !",
                     ).await?;
                 }
             }
         }
         Command::Help => {
-            let help_text = "🕵️ Bienvenue dans l'X-Files Generator ! 🕵️\n\n\
-                             Vous co-écrivez une enquête avec Mulder et Scully.\n\n\
+            let help_text = "🖖 Bienvenue dans le Star Trek Adventure Generator ! 🖖\n\n\
+                             Vous vivez une aventure interactive dans l'univers de Star Trek.\n\n\
                              Comment jouer :\n\
-                             - Écrivez simplement ce que font ou disent nos deux agents (ex: « Mulder fouille la poubelle »).\n\
-                             - Le Maître de Jeu décrira les rebondissements de l'histoire.\n\
+                             - Tapez /start pour lancer une nouvelle mission. Le Narrateur vous demandera votre grade, le nom de votre vaisseau et l'époque choisie.\n\
+                             - Décrivez ensuite vos actions librement ou choisissez parmi les options proposées.\n\
+                             - Le Narrateur gère un système de dés (d20) pour les actions à enjeu : combats, négociations, manœuvres critiques...\n\
                              - Préfixez un message par /ignore pour parler aux autres joueurs sans que le bot ne réagisse.\n\n\
                              Commandes :\n\
-                             /start [état] - Commencer une nouvelle enquête avec un état initial facultatif\n\
-                             /summary - Obtenir un résumé complet de l'histoire pour la reprendre ailleurs\n\
-                             /gemini - Utiliser le modèle Gemini pour la suite de l'enquête\n\
-                             /mistral - Utiliser le modèle Mistral pour la suite de l'enquête\n\
+                             /start [état] - Commencer une nouvelle mission avec un état initial facultatif\n\
+                             /summary - Obtenir un résumé complet de la mission pour la reprendre ailleurs\n\
+                             /gemini - Utiliser le modèle Gemini pour la suite de la mission\n\
+                             /mistral - Utiliser le modèle Mistral pour la suite de la mission\n\
                              /help - Afficher ce message d'aide";
             bot.send_message(msg.chat.id, help_text).await?;
         }
@@ -272,7 +273,7 @@ async fn handle_command(
                 match common::get_story_summary(&config, &conv_state).await {
                     Ok(summary) => {
                         let reply = format!(
-                            "📋 Résumé de l'enquête actuelle (copiez-le comme état initial de /start) :\n\n{}",
+                            "📋 Résumé de la mission actuelle (copiez-le comme état initial de /start) :\n\n{}",
                             summary
                         );
                         bot.send_message(msg.chat.id, reply).await?;
@@ -281,12 +282,12 @@ async fn handle_command(
                         log::error!("Erreur lors de la génération du résumé : {}", e);
                         bot.send_message(
                             msg.chat.id,
-                            "👽 Impossible de générer le résumé. Réessayez !",
+                            "🖖 Impossible de générer le résumé. Réessayez !",
                         ).await?;
                     }
                 }
             } else {
-                bot.send_message(msg.chat.id, "Aucune enquête en cours. Tapez /start pour commencer !").await?;
+                bot.send_message(msg.chat.id, "Aucune mission en cours. Tapez /start pour commencer !").await?;
             }
         }
         Command::Gemini | Command::Mistral => {
@@ -302,12 +303,12 @@ async fn handle_command(
                 dialogue.update(State::Game { state: conv_state }).await?;
                 bot.send_message(
                     msg.chat.id,
-                    format!("🛸 Modèle changé : la suite de l'enquête sera générée par {}.", provider),
+                    format!("🖖 Modèle changé : la suite de la mission sera générée par {}.", provider),
                 ).await?;
             } else {
                 bot.send_message(
                     msg.chat.id,
-                    "Aucune enquête en cours. Lancez /start, puis choisissez le modèle avec /gemini ou /mistral.",
+                    "Aucune mission en cours. Lancez /start, puis choisissez le modèle avec /gemini ou /mistral.",
                 ).await?;
             }
         }
@@ -358,7 +359,7 @@ async fn handle_game_state(
             log::error!("Erreur lors de la génération de l'histoire : {}", e);
             bot.send_message(
                 msg.chat.id,
-                "👽 L'espace-temps s'est plié anormalement. Veuillez reformuler ou réécrire votre dernière action !",
+                "🖖 Les communications subspaciales sont interrompues. Veuillez reformuler ou réécrire votre dernière action !",
             ).await?;
         }
     }
