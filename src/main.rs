@@ -119,6 +119,8 @@ enum Command {
     Gemini,
     #[command(description = "Utiliser le modèle Mistral pour la suite de la mission.")]
     Mistral,
+    #[command(description = "Déployer la dernière version du bot (admin seulement). Ajouter -y pour ignorer les modifications locales.")]
+    Deploy(String),
 }
 
 #[tokio::main]
@@ -263,6 +265,7 @@ async fn handle_command(
                              /summary - Obtenir un résumé complet de la mission pour la reprendre ailleurs\n\
                              /gemini - Utiliser le modèle Gemini pour la suite de la mission\n\
                              /mistral - Utiliser le modèle Mistral pour la suite de la mission\n\
+                             /deploy [-y] - Déployer la dernière version (admin) ; -y pour ignorer les modifications locales\n\
                              /help - Afficher ce message d'aide";
             bot.send_message(msg.chat.id, help_text).await?;
         }
@@ -312,8 +315,142 @@ async fn handle_command(
                 ).await?;
             }
         }
+        Command::Deploy(args) => {
+            handle_deploy(&bot, &msg, args.trim()).await?;
+        }
     }
     Ok(())
+}
+
+async fn handle_deploy(bot: &Bot, msg: &Message, args: &str) -> HandlerResult {
+    // Vérification admin
+    let admin_id = std::env::var("ADMIN_USER_ID")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let requester_id = msg.from.as_ref().map(|u| u.id.0);
+
+    match (admin_id, requester_id) {
+        (None, _) => {
+            bot.send_message(
+                msg.chat.id,
+                "⚠️ ADMIN_USER_ID n'est pas configuré dans le .env — commande désactivée.",
+            )
+            .await?;
+            return Ok(());
+        }
+        (Some(admin), Some(req)) if admin == req => {}
+        _ => {
+            bot.send_message(msg.chat.id, "⛔ Accès refusé.").await?;
+            return Ok(());
+        }
+    }
+
+    let force = args == "-y";
+
+    // Étape 1 : git diff
+    if !force {
+        let diff = tokio::process::Command::new("/usr/bin/git")
+            .args(["diff", "--stat"])
+            .output()
+            .await
+            .map_err(|e| format!("Impossible de lancer git : {}", e))?;
+
+        if !diff.stdout.is_empty() {
+            let stat = String::from_utf8_lossy(&diff.stdout);
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "⚠️ Des modifications locales non commitées existent :\n\n{}\n\nUtilisez /deploy -y pour déployer quand même.",
+                    stat.trim()
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
+    // Étape 2 : git pull
+    bot.send_message(msg.chat.id, "🔄 git pull en cours...").await?;
+    let pull = tokio::process::Command::new("/usr/bin/git")
+        .args(["pull"])
+        .output()
+        .await
+        .map_err(|e| format!("Impossible de lancer git pull : {}", e))?;
+
+    if !pull.status.success() {
+        let err = String::from_utf8_lossy(&pull.stderr);
+        bot.send_message(
+            msg.chat.id,
+            format!("❌ git pull a échoué :\n\n{}", truncate_head(&err, 3800)),
+        )
+        .await?;
+        return Ok(());
+    }
+    let pull_out = String::from_utf8_lossy(&pull.stdout);
+
+    // Étape 3 : cargo build --release
+    bot.send_message(
+        msg.chat.id,
+        format!(
+            "🔨 Compilation en cours (peut prendre plusieurs minutes)...\n{}",
+            pull_out.trim()
+        ),
+    )
+    .await?;
+
+    let build = tokio::process::Command::new("/usr/bin/cargo")
+        .args(["build", "--release"])
+        .output()
+        .await
+        .map_err(|e| format!("Impossible de lancer cargo : {}", e))?;
+
+    if !build.status.success() {
+        let stderr = String::from_utf8_lossy(&build.stderr);
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "❌ Compilation échouée — le service n'a PAS été redémarré, l'ancienne version continue de tourner.\n\n{}",
+                truncate_tail(&stderr, 3600)
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Étape 4 : redémarrage
+    bot.send_message(
+        msg.chat.id,
+        "✅ Compilation réussie ! Redémarrage du service dans 1 seconde...",
+    )
+    .await?;
+
+    // On spawn pour laisser le temps à Telegram de recevoir le message avant que le process meure
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let _ = tokio::process::Command::new("sudo")
+            .args(["systemctl", "restart", "xfiles-bot"])
+            .output()
+            .await;
+    });
+
+    Ok(())
+}
+
+fn truncate_tail(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let start = s.char_indices().nth(s.chars().count() - max_chars).map(|(i, _)| i).unwrap_or(0);
+    format!("[...]\n{}", &s[start..])
+}
+
+fn truncate_head(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let end = s.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(s.len());
+    format!("{}\n[...]", &s[..end])
 }
 
 async fn handle_game_state(
