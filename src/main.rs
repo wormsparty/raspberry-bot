@@ -247,6 +247,11 @@ fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
 
     let message_handler = Update::filter_message()
         .chain(dptree::filter(|msg: Message| {
+            // Un message qui répond à un autre message du chat (un joueur qui
+            // s'adresse à un autre joueur) n'est pas une action de jeu.
+            if msg.reply_to_message().is_some() {
+                return false;
+            }
             if let Some(text) = msg.text() {
                 // /ignore permet de parler aux autres joueurs du chat sans que
                 // le message ne soit interprété comme une action du jeu
