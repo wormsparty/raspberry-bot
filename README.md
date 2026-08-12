@@ -1,40 +1,61 @@
-# 🛸 Mulder & Scully - Telegram AI Dungeon Bot (Rust)
+# 🧛 Buffy contre les Vampires — Bot Discord AI Dungeon (Rust)
 
-Ce projet est un exemple de bot Telegram codé en Rust qui permet de jouer à une aventure textuelle de type "AI Dungeon" en co-écriture avec un ami. L'histoire suit les agents Fox Mulder et Dana Scully dans des enquêtes humoristiques, absurdes et surréalistes (maisons marchantes, tableaux de Freud récurrents, etc.). 
+Ce projet est un bot Discord codé en Rust qui permet de jouer à une aventure textuelle de type "AI Dungeon" en co-écriture avec des amis. L'histoire se déroule dans l'univers de *Buffy contre les vampires* : Sunnydale, la Bouche de l'Enfer, le Conseil des Observateurs, les vampires, les démons et les sorts qui tournent mal.
 
-Le bot utilise l'API **Gemini** ou **Mistral** pour la narration (avec un schéma JSON structuré pour garantir un comportement fiable). Le modèle peut être changé en cours de partie avec `/gemini` et `/mistral` ; ce choix est sauvegardé avec l'état du jeu et survit aux redémarrages.
+Le bot utilise l'API **Gemini** ou **Mistral** pour la narration (avec un schéma JSON structuré pour garantir un comportement fiable). Le modèle peut être changé en cours de partie avec `/model` ; ce choix est sauvegardé avec l'état du jeu et survit aux redémarrages.
 
 ---
 
 ## 🛠️ Fonctionnalités du Bot
 
-- **Narrateur interactif** : le LLM joue le rôle de Maître de Jeu (MJ) et décrit les conséquences absurdes de vos actions.
-- **Mode multijoueur (Groupes)** : Ajoutez le bot dans un groupe avec votre ami. Le bot maintient l'état de l'histoire pour le groupe entier, permettant de jouer à deux en prenant des tours.
-- **Commandes intégrées** :
-  - `/start [état initial]` : Démarre une nouvelle enquête absurde. Vous pouvez lui spécifier un état initial (ex : `/start Nous sommes au pôle nord, il fait froid`), par exemple obtenu via `/summary`.
-  - `/summary` : Génère un résumé complet de l'enquête, réutilisable comme état initial de `/start` (sur ce bot ou ailleurs).
-  - `/gemini` / `/mistral` : Change le modèle utilisé pour la suite de l'enquête (nécessite la clé API correspondante).
+- **Narrateur interactif** : le LLM joue le rôle d'Observateur / Maître de Jeu et décrit les conséquences de vos actions, dés à 20 faces à l'appui.
+- **Mode multijoueur** : une aventure par **salon Discord**. Tous les joueurs d'un même salon partagent la même histoire et jouent à tour de rôle.
+- **Illustrations optionnelles** : pour les scènes visuellement marquantes, le bot génère une image via OpenRouter (nécessite `OPENROUTER_API_KEY`).
+- **Slash commands** :
+  - `/start [etat]` : Démarre une nouvelle aventure. Vous pouvez spécifier un état initial (ex : `/start etat:Nous sommes au cimetière, il fait nuit`), par exemple obtenu via `/summary`.
+  - `/summary` : Génère le journal de l'Observateur, réutilisable comme état initial de `/start` (sur ce bot ou ailleurs).
+  - `/model gemini|mistral` : Change le modèle utilisé pour la suite de l'aventure (nécessite la clé API correspondante).
+  - `/image actif:true|false` : Active ou désactive la génération d'images.
+  - `/deploy [force]` : Déploie la dernière version du bot (réservé à l'admin, voir `ADMIN_USER_ID`).
   - `/help` : Affiche l'aide et les commandes.
-  - Préfixez un message par `/ignore` pour parler aux autres joueurs sans que le bot ne réagisse.
+
+### Comment le bot lit les messages
+
+Une fois `/start` lancé dans un salon, **tout message normal du salon est interprété comme une action de jeu**. Pour discuter entre joueurs sans que le bot ne réagisse :
+
+- préfixez le message par `/ignore`, `/i ` ou `!` ;
+- ou **répondez** (reply) à un message : les réponses ne sont jamais interprétées comme des actions.
+
+Tant qu'aucune aventure n'a été lancée dans un salon, le bot reste totalement silencieux.
 
 ---
 
 ## 📋 Prérequis
 
 1. **Rust** installé sur votre machine (développement) ou sur le Raspberry Pi.
-2. **Un Token de Bot Telegram** (créé via `@BotFather`).
-3. **Une clé API Gemini** (obtenue sur Google AI Studio).
+2. **Une application Discord + un bot** (créés sur https://discord.com/developers/applications).
+3. **Une clé API Gemini** (obtenue sur Google AI Studio) ou **Mistral**.
 
 ---
 
 ## ⚙️ Configuration
 
-1. Clonez ou copiez ce dossier sur votre Raspberry Pi (ou machine de dev).
-2. Créez un fichier nommé `.env` à la racine du projet et ajoutez vos clés :
+### 1. Créer le bot Discord
+
+1. Sur https://discord.com/developers/applications, créez une application, puis un **Bot**.
+2. Copiez le **token** du bot (onglet *Bot* → *Reset Token*).
+3. Dans l'onglet *Bot*, activez l'intent privilégié **MESSAGE CONTENT INTENT**.
+   > [!IMPORTANT]
+   > Sans cet intent, Discord n'envoie pas le contenu des messages : le bot verra les slash commands mais **aucune action de jeu**. Un avertissement est écrit dans les logs si ce cas est détecté.
+4. Onglet *OAuth2 → URL Generator* : cochez les scopes `bot` et `applications.commands`, puis les permissions `Send Messages`, `Attach Files` et `Read Message History`. Ouvrez l'URL générée pour inviter le bot sur votre serveur.
+
+### 2. Le fichier `.env`
+
+Créez un fichier nommé `.env` à la racine du projet :
 
 ```env
-# Token Telegram (obtenu auprès de @BotFather)
-TELEGRAM_BOT_TOKEN=ton_token_telegram_ici
+# Token du bot Discord (onglet Bot du portail développeur)
+DISCORD_TOKEN=ton_token_discord_ici
 
 # Modèle utilisé par défaut : "gemini" ou "mistral"
 MODEL_PROVIDER=gemini
@@ -42,22 +63,29 @@ MODEL_PROVIDER=gemini
 # Clé API Gemini (obtenue sur Google AI Studio)
 GEMINI_API_KEY=ta_cle_gemini_ici
 
-# Clé API Mistral (facultative, nécessaire pour /mistral)
+# Clé API Mistral (facultative, nécessaire pour /model mistral)
 MISTRAL_API_KEY=ta_cle_mistral_ici
+
+# Clé OpenRouter (facultative, nécessaire pour la génération d'images)
+OPENROUTER_API_KEY=ta_cle_openrouter_ici
+
+# ID Discord de l'administrateur autorisé à lancer /deploy (facultatif).
+# Pour l'obtenir : activez le mode développeur dans Discord, puis clic droit
+# sur votre nom > "Copier l'identifiant".
+ADMIN_USER_ID=123456789012345678
+
+# Chemin vers cargo, uniquement si /deploy ne le trouve pas (facultatif).
+# Par défaut : $CARGO_BIN, puis $HOME/.cargo/bin/cargo, puis le PATH.
+#CARGO_BIN=/home/utilisateur/.cargo/bin/cargo
+
+# Nom du service systemd redémarré par /deploy (facultatif, défaut: raspberry-bot)
+#SERVICE_NAME=raspberry-bot
 
 # Niveau de log pour la console
 RUST_LOG=info
 ```
 
-> [!IMPORTANT]
-> **Pour jouer dans un groupe Telegram avec votre ami :**
-> Par défaut, les bots Telegram ne lisent pas tous les messages d'un groupe (pour des raisons de confidentialité).
-> Pour que le bot puisse réagir à chaque action de l'histoire dans un groupe, vous devez :
-> 1. Ouvrir une discussion avec `@BotFather`.
-> 2. Envoyer la commande `/setprivacy`.
-> 3. Sélectionner votre bot.
-> 4. Choisir **Disable** (Désactiver).
-> *(Alternativement, vous pouvez simplement promouvoir le bot en tant qu'administrateur du groupe)*.
+> Les slash commands sont enregistrées globalement au démarrage du bot. Discord peut mettre quelques minutes à les propager la première fois.
 
 ---
 
@@ -80,23 +108,28 @@ La compilation sur Raspberry Pi peut prendre quelques minutes mais produira un e
 ```bash
 cargo build --release
 ```
-L'exécutable compilé se trouvera dans `target/release/xfiles_bot`.
+L'exécutable compilé se trouvera dans `target/release/raspberry_bot`.
 
 ### 2. Configurer un service Systemd (Recommandé)
-Pour que le bot se lance automatiquement au démarrage du Raspberry Pi et redémarre en cas de plantage :
 
-Créez un fichier de service systemd (par exemple `/etc/systemd/system/xfiles-bot.service`) avec les droits super-utilisateur (`sudo nano /etc/systemd/system/xfiles-bot.service`) :
+Le plus simple est d'utiliser le script fourni, qui crée le service avec le bon utilisateur et le bon répertoire de travail :
+
+```bash
+sudo ./install_service.sh
+```
+
+Il génère un fichier `/etc/systemd/system/raspberry-bot.service` équivalent à :
 
 ```ini
 [Unit]
-Description=Mulder and Scully Telegram Bot
+Description=Buffy the Vampire Slayer Discord Bot
 After=network.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/xfiles_bot
-ExecStart=/home/pi/xfiles_bot/target/release/xfiles_bot
+User=<votre utilisateur>
+WorkingDirectory=<répertoire du projet>
+ExecStart=<répertoire du projet>/target/release/raspberry_bot
 Restart=always
 RestartSec=5
 
@@ -104,24 +137,28 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Activez et démarrez le service :
-
-```bash
-sudo systemctl enable xfiles-bot.service
-sudo systemctl start xfiles-bot.service
-```
-
 Pour voir les logs du bot en temps réel :
 ```bash
-sudo journalctl -u xfiles-bot.service -f
+sudo journalctl -u raspberry-bot.service -f
 ```
+
+Pour retirer le service :
+```bash
+sudo ./uninstall_service.sh
+```
+
+> [!NOTE]
+> La commande `/deploy` exécute `git pull`, `cargo build --release` puis `sudo systemctl restart raspberry-bot`. Pour qu'elle fonctionne sans mot de passe, l'utilisateur du service doit avoir une règle sudoers autorisant ce redémarrage.
 
 ---
 
 ## 🔍 Structure du Code
 
-- [Cargo.toml](Cargo.toml) : Gère les dépendances (Teloxide, Reqwest, Serde, Tokio).
-- [src/common.rs](src/common.rs) : État de la conversation, consigne système, et orchestration partagée (résumé glissant, génération de l'histoire) indépendante du provider.
+- [Cargo.toml](Cargo.toml) : Gère les dépendances (Serenity, Reqwest, Serde, Tokio).
+- [src/common.rs](src/common.rs) : État de la conversation, consigne système (l'univers Buffy), et orchestration partagée (résumé glissant, génération de l'histoire) indépendante du provider.
 - [src/gemini.rs](src/gemini.rs) : Adaptateur pour l'API REST de Gemini (génération de texte structuré JSON).
 - [src/mistral.rs](src/mistral.rs) : Adaptateur pour l'API REST de Mistral.
-- [src/main.rs](src/main.rs) : Contient la logique du bot Telegram, les gestionnaires de commandes, et la machine à états de dialogue.
+- [src/image.rs](src/image.rs) : Génération d'illustrations via OpenRouter.
+- [src/main.rs](src/main.rs) : Logique du bot Discord (Serenity) — slash commands, actions de jeu, persistance des sessions par salon, déploiement.
+
+Les sessions sont stockées dans le dossier `sessions/`, un fichier JSON par salon Discord.

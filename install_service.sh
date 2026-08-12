@@ -8,16 +8,16 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-SERVICE_FILE="/etc/systemd/system/xfiles-bot.service"
+SERVICE_FILE="/etc/systemd/system/raspberry-bot.service"
 BOT_DIR=$(pwd)
-EXEC_PATH="$BOT_DIR/target/release/xfiles_bot"
+EXEC_PATH="$BOT_DIR/target/release/raspberry_bot"
 
-echo "⚙️ Configuration du service systemd pour le bot X-Files..."
+echo "⚙️ Configuration du service systemd pour le bot Buffy..."
 
 # 1. Création du fichier service
 cat <<EOF > "$SERVICE_FILE"
 [Unit]
-Description=Mulder and Scully Telegram Bot
+Description=Buffy the Vampire Slayer Discord Bot
 After=network.target
 
 [Service]
@@ -40,15 +40,15 @@ systemctl daemon-reload
 
 # 3. Activation au démarrage
 echo "➕ Activation du service au démarrage..."
-systemctl enable xfiles-bot.service
+systemctl enable raspberry-bot.service
 
 # 4. Démarrage du service
 echo "🚀 Démarrage du service..."
-systemctl start xfiles-bot.service
+systemctl start raspberry-bot.service
 
 # 5. Vérification du statut
 echo "----------------------------------------"
-systemctl status xfiles-bot.service --no-pager
+systemctl status raspberry-bot.service --no-pager
 echo "----------------------------------------"
 echo "🎉 Installation terminée ! Le bot tourne en arrière-plan."
-echo "👉 Pour voir les logs en direct, utilisez : sudo journalctl -u xfiles-bot.service -f"
+echo "👉 Pour voir les logs en direct, utilisez : sudo journalctl -u raspberry-bot.service -f"

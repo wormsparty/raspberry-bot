@@ -6,22 +6,22 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-SERVICE_FILE="/etc/systemd/system/xfiles-bot.service"
+SERVICE_FILE="/etc/systemd/system/raspberry-bot.service"
 
-echo "🛑 Arrêt et désinstallation du service systemd du bot X-Files..."
+echo "🛑 Arrêt et désinstallation du service systemd du bot Buffy..."
 
 # 1. Arrêt du service
-if systemctl is-active --quiet xfiles-bot.service; then
+if systemctl is-active --quiet raspberry-bot.service; then
   echo "🛑 Arrêt du service en cours..."
-  systemctl stop xfiles-bot.service
+  systemctl stop raspberry-bot.service
 else
   echo "ℹ️ Le service n'est pas actif actuellement."
 fi
 
 # 2. Désactivation au démarrage
-if systemctl is-enabled --quiet xfiles-bot.service 2>/dev/null; then
+if systemctl is-enabled --quiet raspberry-bot.service 2>/dev/null; then
   echo "➖ Désactivation du service au démarrage..."
-  systemctl disable xfiles-bot.service
+  systemctl disable raspberry-bot.service
 fi
 
 # 3. Suppression du fichier de service
