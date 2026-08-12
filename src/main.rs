@@ -1,6 +1,5 @@
 mod common;
 mod gemini;
-mod image;
 mod mistral;
 
 use std::collections::HashMap;
@@ -51,8 +50,12 @@ pub struct SessionStore {
 
 impl SessionStore {
     pub fn new(dir: PathBuf) -> Self {
-        std::fs::create_dir_all(&dir)
-            .unwrap_or_else(|e| panic!("Impossible de créer le dossier de sessions {:?} : {}", dir, e));
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
+            panic!(
+                "Impossible de créer le dossier de sessions {:?} : {}",
+                dir, e
+            )
+        });
         Self { dir }
     }
 
@@ -74,7 +77,11 @@ impl SessionStore {
             Ok(state) => Some(state),
             Err(e) => {
                 // Session corrompue : on repart de zéro plutôt que de bloquer le salon
-                log::warn!("Session illisible ({}), réinitialisation : {}", path.display(), e);
+                log::warn!(
+                    "Session illisible ({}), réinitialisation : {}",
+                    path.display(),
+                    e
+                );
                 None
             }
         }
@@ -152,26 +159,6 @@ impl Reply<'_> {
             }
         }
     }
-
-    async fn image(&self, bytes: Vec<u8>) {
-        let attachment = CreateAttachment::bytes(bytes, "scene.png");
-        let result = match self {
-            Reply::Channel(ctx, id) => id
-                .send_message(&ctx.http, CreateMessage::new().add_file(attachment))
-                .await
-                .map(|_| ()),
-            Reply::Command(ctx, cmd) => cmd
-                .create_followup(
-                    &ctx.http,
-                    CreateInteractionResponseFollowup::new().add_file(attachment),
-                )
-                .await
-                .map(|_| ()),
-        };
-        if let Err(e) = result {
-            log::error!("Impossible d'envoyer l'image Discord : {}", e);
-        }
-    }
 }
 
 // Découpe un texte en morceaux d'au plus `limit` caractères, en préservant
@@ -231,23 +218,6 @@ impl Handler {
             .clone()
     }
 
-    async fn maybe_send_image(&self, reply: &Reply<'_>, image_enabled: bool, scene_description: &str) {
-        if !image_enabled || scene_description.is_empty() {
-            return;
-        }
-        let key = match &self.config.openrouter_key {
-            Some(k) => k.clone(),
-            None => return,
-        };
-
-        reply.typing().await;
-
-        match image::generate_scene_image(&self.config.client, &key, scene_description).await {
-            Ok(bytes) => reply.image(bytes).await,
-            Err(e) => reply.text(vision_error_message(e.as_ref())).await,
-        }
-    }
-
     // Traite une action de jeu (texte libre) pour un salon donné.
     async fn play_turn(&self, reply: &Reply<'_>, mut state: ConversationState, action: &str) {
         let channel_id = reply.channel_id();
@@ -255,12 +225,10 @@ impl Handler {
 
         match common::generate_story(&self.config, &mut state, action).await {
             Ok(story) => {
-                let image_enabled = state.image_enabled;
                 if let Err(e) = self.store.save(channel_id, &state).await {
                     log::error!("Impossible de sauvegarder la session : {}", e);
                 }
                 reply.text(&story.story_text).await;
-                self.maybe_send_image(reply, image_enabled, &story.scene_description).await;
             }
             Err(e) => {
                 log::error!("Erreur lors de la génération de l'histoire : {}", e);
@@ -349,13 +317,13 @@ impl EventHandler for Handler {
                 let previous = self.store.load(command.channel_id).await;
                 let mut state = ConversationState {
                     provider: previous.as_ref().and_then(|s| s.provider),
-                    image_enabled: previous.as_ref().map(|s| s.image_enabled).unwrap_or(true),
                     ..Default::default()
                 };
 
                 let initial_state = string_option(&options, "etat").unwrap_or("").trim();
                 let start_msg = if initial_state.is_empty() {
-                    "Commence une nouvelle aventure dans l'univers de Buffy contre les vampires.".to_string()
+                    "Commence une nouvelle aventure dans l'univers de Buffy contre les vampires."
+                        .to_string()
                 } else {
                     format!(
                         "Commence une nouvelle aventure dans l'univers de Buffy contre les vampires. État initial : {}",
@@ -370,12 +338,10 @@ impl EventHandler for Handler {
 
                 match common::generate_story(&self.config, &mut state, &start_msg).await {
                     Ok(story) => {
-                        let image_enabled = state.image_enabled;
                         if let Err(e) = self.store.save(command.channel_id, &state).await {
                             log::error!("Impossible de sauvegarder la session : {}", e);
                         }
                         reply.text(&story.story_text).await;
-                        self.maybe_send_image(&reply, image_enabled, &story.scene_description).await;
                     }
                     Err(e) => {
                         log::error!("Erreur lors du démarrage du jeu : {}", e);
@@ -388,36 +354,42 @@ impl EventHandler for Handler {
             "help" => {
                 reply.text(HELP_TEXT).await;
             }
-            "summary" => match self.store.load(command.channel_id).await {
-                Some(state) => {
-                    reply.typing().await;
-                    match common::get_story_summary(&self.config, &state).await {
-                        Ok(summary) => {
-                            reply
+            "summary" => {
+                match self.store.load(command.channel_id).await {
+                    Some(state) => {
+                        reply.typing().await;
+                        match common::get_story_summary(&self.config, &state).await {
+                            Ok(summary) => {
+                                reply
                                 .text(&format!(
                                     "📓 Journal de l'Observateur (copiez-le comme état initial de /start) :\n\n{}",
                                     summary
                                 ))
                                 .await;
-                        }
-                        Err(e) => {
-                            log::error!("Erreur lors de la génération du résumé : {}", e);
-                            reply.text("🧛 Impossible de rédiger le journal. Réessayez !").await;
+                            }
+                            Err(e) => {
+                                log::error!("Erreur lors de la génération du résumé : {}", e);
+                                reply
+                                    .text("🧛 Impossible de rédiger le journal. Réessayez !")
+                                    .await;
+                            }
                         }
                     }
-                }
-                None => {
-                    reply
+                    None => {
+                        reply
                         .text("Aucune aventure en cours dans ce salon. Tapez /start pour commencer !")
                         .await;
+                    }
                 }
-            },
+            }
             "model" => {
                 let provider = match string_option(&options, "modele").unwrap_or("") {
                     "gemini" => ModelProvider::Gemini,
                     "mistral" => ModelProvider::Mistral,
                     _ => {
-                        reply.text("⚠️ Modèle inconnu. Choisissez gemini ou mistral.").await;
+                        reply
+                            .text("⚠️ Modèle inconnu. Choisissez gemini ou mistral.")
+                            .await;
                         return;
                     }
                 };
@@ -450,37 +422,15 @@ impl EventHandler for Handler {
                     }
                 }
             }
-            "image" => {
-                let enabled = bool_option(&options, "actif").unwrap_or(true);
-
-                let lock = self.channel_lock(command.channel_id).await;
-                let _guard = lock.lock().await;
-
-                match self.store.load(command.channel_id).await {
-                    Some(mut state) => {
-                        state.image_enabled = enabled;
-                        if let Err(e) = self.store.save(command.channel_id, &state).await {
-                            log::error!("Impossible de sauvegarder la session : {}", e);
-                        }
-                        let status = if enabled { "activée" } else { "désactivée" };
-                        reply
-                            .text(&format!("🧛 Génération d'images {} pour cette aventure.", status))
-                            .await;
-                    }
-                    None => {
-                        reply
-                            .text("Aucune aventure en cours. Lancez /start, puis utilisez /image.")
-                            .await;
-                    }
-                }
-            }
             "deploy" => {
                 let force = bool_option(&options, "force").unwrap_or(false);
                 handle_deploy(&reply, command.user.id, force).await;
             }
             other => {
                 log::warn!("Commande inconnue reçue : {}", other);
-                reply.text("⚠️ Commande inconnue. Tapez /help pour la liste des commandes.").await;
+                reply
+                    .text("⚠️ Commande inconnue. Tapez /help pour la liste des commandes.")
+                    .await;
             }
         }
     }
@@ -506,16 +456,6 @@ fn slash_commands() -> Vec<CreateCommand> {
                     .add_string_choice("gemini", "gemini")
                     .add_string_choice("mistral", "mistral"),
             ),
-        CreateCommand::new("image")
-            .description("Activer ou désactiver la génération d'images.")
-            .add_option(
-                CreateCommandOption::new(
-                    CommandOptionType::Boolean,
-                    "actif",
-                    "Vrai pour activer les images, faux pour les désactiver.",
-                )
-                .required(true),
-            ),
         CreateCommand::new("deploy")
             .description("Déployer la dernière version du bot (admin seulement).")
             .add_option(CreateCommandOption::new(
@@ -527,17 +467,23 @@ fn slash_commands() -> Vec<CreateCommand> {
 }
 
 fn string_option<'a>(options: &'a [ResolvedOption<'a>], name: &str) -> Option<&'a str> {
-    options.iter().find(|o| o.name == name).and_then(|o| match &o.value {
-        ResolvedValue::String(s) => Some(*s),
-        _ => None,
-    })
+    options
+        .iter()
+        .find(|o| o.name == name)
+        .and_then(|o| match &o.value {
+            ResolvedValue::String(s) => Some(*s),
+            _ => None,
+        })
 }
 
 fn bool_option(options: &[ResolvedOption<'_>], name: &str) -> Option<bool> {
-    options.iter().find(|o| o.name == name).and_then(|o| match &o.value {
-        ResolvedValue::Boolean(b) => Some(*b),
-        _ => None,
-    })
+    options
+        .iter()
+        .find(|o| o.name == name)
+        .and_then(|o| match &o.value {
+            ResolvedValue::Boolean(b) => Some(*b),
+            _ => None,
+        })
 }
 
 const HELP_TEXT: &str = "🧛 Bienvenue sur la Bouche de l'Enfer ! 🧛\n\n\
@@ -552,37 +498,8 @@ const HELP_TEXT: &str = "🧛 Bienvenue sur la Bouche de l'Enfer ! 🧛\n\n\
      `/start [etat]` — Commencer une nouvelle aventure avec un état initial facultatif\n\
      `/summary` — Obtenir le journal de l'Observateur, réutilisable comme état initial de `/start`\n\
      `/model gemini|mistral` — Choisir le modèle IA pour la suite de l'aventure\n\
-     `/image actif:true|false` — Activer ou désactiver la génération d'images\n\
      `/deploy [force]` — Déployer la dernière version (admin)\n\
      `/help` — Afficher ce message d'aide";
-
-// --- Messages d'erreur pour la génération d'images ---------------------------
-
-static VISION_ERRORS: &[&str] = &[
-    "⚠️ *La boule de cristal se voile.* La vision refuse de se former — trop d'interférences sur la Bouche de l'Enfer. L'histoire continue sans image.",
-    "⚠️ *Le sortilège de projection a échoué.* Il manque un ingrédient au rituel, et personne n'a le temps de courir au magasin de magie. Pas d'image pour cette scène.",
-    "⚠️ *Les archives du Conseil des Observateurs sont incomplètes.* Aucune illustration ne correspond à cette scène. Poursuivez.",
-    "⚠️ *Une aura démoniaque brouille la vision.* Impossible de matérialiser l'image. La nuit continue.",
-    "⚠️ *La transe s'interrompt brutalement.* La vision se dissipe avant d'avoir pris forme. L'histoire poursuit son cours.",
-];
-
-const VISION_BUDGET_ERROR: &str = "⚠️ *Le Conseil des Observateurs a gelé les fonds !* \
-    Plus un centime pour les rituels de vision — il faudra renégocier le budget avant que les projections reprennent. \
-    L'aventure continue sans images pour le moment.";
-
-fn vision_error_message(err: &dyn std::fmt::Display) -> &'static str {
-    let err_str = err.to_string();
-    log::warn!("Erreur génération image : {}", err_str);
-    if err_str.contains("402") {
-        return VISION_BUDGET_ERROR;
-    }
-    let idx = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as usize)
-        .unwrap_or(0)
-        % VISION_ERRORS.len();
-    VISION_ERRORS[idx]
-}
 
 // --- Déploiement -------------------------------------------------------------
 
@@ -615,7 +532,9 @@ async fn handle_deploy(reply: &Reply<'_>, requester: UserId, force: bool) {
         {
             Ok(o) => o,
             Err(e) => {
-                reply.text(&format!("❌ Impossible de lancer git : {}", e)).await;
+                reply
+                    .text(&format!("❌ Impossible de lancer git : {}", e))
+                    .await;
                 return;
             }
         };
@@ -634,10 +553,16 @@ async fn handle_deploy(reply: &Reply<'_>, requester: UserId, force: bool) {
 
     // Étape 2 : git pull
     reply.text("🔄 git pull en cours...").await;
-    let pull = match tokio::process::Command::new("git").args(["pull"]).output().await {
+    let pull = match tokio::process::Command::new("git")
+        .args(["pull"])
+        .output()
+        .await
+    {
         Ok(o) => o,
         Err(e) => {
-            reply.text(&format!("❌ Impossible de lancer git pull : {}", e)).await;
+            reply
+                .text(&format!("❌ Impossible de lancer git pull : {}", e))
+                .await;
             return;
         }
     };
@@ -645,7 +570,10 @@ async fn handle_deploy(reply: &Reply<'_>, requester: UserId, force: bool) {
     if !pull.status.success() {
         let err = String::from_utf8_lossy(&pull.stderr);
         reply
-            .text(&format!("❌ git pull a échoué :\n\n{}", truncate_head(&err, 1800)))
+            .text(&format!(
+                "❌ git pull a échoué :\n\n{}",
+                truncate_head(&err, 1800)
+            ))
             .await;
         return;
     }
@@ -716,7 +644,10 @@ async fn handle_deploy(reply: &Reply<'_>, requester: UserId, force: bool) {
                 let err = String::from_utf8_lossy(&out.stderr);
                 log::error!("systemctl restart a échoué : {}", err);
                 let _ = channel_id
-                    .say(&http, format!("❌ Redémarrage échoué :\n{}", truncate_tail(&err, 1000)))
+                    .say(
+                        &http,
+                        format!("❌ Redémarrage échoué :\n{}", truncate_tail(&err, 1000)),
+                    )
                     .await;
             }
             Ok(_) => {} // succès → le process meurt, rien à envoyer
@@ -744,7 +675,14 @@ fn truncate_head(s: &str, max_chars: usize) -> String {
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
-    pretty_env_logger::init();
+    // Serenity expose ses spans internes via la cible `tracing::span`. Au
+    // niveau INFO, cela logge chaque heartbeat et réception gateway ; on garde
+    // uniquement ses avertissements et erreurs sans toucher à RUST_LOG pour le
+    // reste de l'application.
+    let mut logger = pretty_env_logger::formatted_builder();
+    logger.parse_filters(&std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()));
+    logger.filter_module("tracing::span", log::LevelFilter::Warn);
+    logger.init();
     log::info!("Démarrage du bot Buffy contre les vampires...");
 
     let token = std::env::var("DISCORD_TOKEN")
@@ -760,7 +698,10 @@ async fn main() {
         "gemini" => ModelProvider::Gemini,
         "mistral" => ModelProvider::Mistral,
         other => {
-            panic!("MODEL_PROVIDER inconnu : '{}'. Les valeurs possibles sont 'gemini' ou 'mistral'.", other);
+            panic!(
+                "MODEL_PROVIDER inconnu : '{}'. Les valeurs possibles sont 'gemini' ou 'mistral'.",
+                other
+            );
         }
     };
 
@@ -774,7 +715,6 @@ async fn main() {
         default_provider,
         gemini_key: std::env::var("GEMINI_API_KEY").ok(),
         mistral_key: std::env::var("MISTRAL_API_KEY").ok(),
-        openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
     };
 
     // La clé du provider par défaut est indispensable ; les autres sont optionnelles.
@@ -785,7 +725,10 @@ async fn main() {
     // Valider ADMIN_USER_ID au démarrage pour détecter les fautes de frappe immédiatement.
     if let Ok(raw) = std::env::var("ADMIN_USER_ID") {
         if raw.parse::<u64>().is_err() {
-            panic!("ADMIN_USER_ID='{}' n'est pas un entier u64 valide — corrigez le fichier .env", raw);
+            panic!(
+                "ADMIN_USER_ID='{}' n'est pas un entier u64 valide — corrigez le fichier .env",
+                raw
+            );
         }
     }
 

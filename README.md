@@ -10,12 +10,10 @@ Le bot utilise l'API **Gemini** ou **Mistral** pour la narration (avec un schém
 
 - **Narrateur interactif** : le LLM joue le rôle d'Observateur / Maître de Jeu et décrit les conséquences de vos actions, dés à 20 faces à l'appui.
 - **Mode multijoueur** : une aventure par **salon Discord**. Tous les joueurs d'un même salon partagent la même histoire et jouent à tour de rôle.
-- **Illustrations optionnelles** : pour les scènes visuellement marquantes, le bot génère une image via OpenRouter (nécessite `OPENROUTER_API_KEY`).
 - **Slash commands** :
   - `/start [etat]` : Démarre une nouvelle aventure. Vous pouvez spécifier un état initial (ex : `/start etat:Nous sommes au cimetière, il fait nuit`), par exemple obtenu via `/summary`.
   - `/summary` : Génère le journal de l'Observateur, réutilisable comme état initial de `/start` (sur ce bot ou ailleurs).
   - `/model gemini|mistral` : Change le modèle utilisé pour la suite de l'aventure (nécessite la clé API correspondante).
-  - `/image actif:true|false` : Active ou désactive la génération d'images.
   - `/deploy [force]` : Déploie la dernière version du bot (réservé à l'admin, voir `ADMIN_USER_ID`).
   - `/help` : Affiche l'aide et les commandes.
 
@@ -47,7 +45,7 @@ Tant qu'aucune aventure n'a été lancée dans un salon, le bot reste totalement
 3. Dans l'onglet *Bot*, activez l'intent privilégié **MESSAGE CONTENT INTENT**.
    > [!IMPORTANT]
    > Sans cet intent, Discord n'envoie pas le contenu des messages : le bot verra les slash commands mais **aucune action de jeu**. Un avertissement est écrit dans les logs si ce cas est détecté.
-4. Onglet *OAuth2 → URL Generator* : cochez les scopes `bot` et `applications.commands`, puis les permissions `Send Messages`, `Attach Files` et `Read Message History`. Ouvrez l'URL générée pour inviter le bot sur votre serveur.
+4. Onglet *OAuth2 → URL Generator* : cochez les scopes `bot` et `applications.commands`, puis les permissions `Send Messages` et `Read Message History`. Ouvrez l'URL générée pour inviter le bot sur votre serveur.
 
 ### 2. Le fichier `.env`
 
@@ -66,9 +64,6 @@ GEMINI_API_KEY=ta_cle_gemini_ici
 # Clé API Mistral (facultative, nécessaire pour /model mistral)
 MISTRAL_API_KEY=ta_cle_mistral_ici
 
-# Clé OpenRouter (facultative, nécessaire pour la génération d'images)
-OPENROUTER_API_KEY=ta_cle_openrouter_ici
-
 # ID Discord de l'administrateur autorisé à lancer /deploy (facultatif).
 # Pour l'obtenir : activez le mode développeur dans Discord, puis clic droit
 # sur votre nom > "Copier l'identifiant".
@@ -81,7 +76,8 @@ ADMIN_USER_ID=123456789012345678
 # Nom du service systemd redémarré par /deploy (facultatif, défaut: raspberry-bot)
 #SERVICE_NAME=raspberry-bot
 
-# Niveau de log pour la console
+# Niveau de log pour le bot. Les spans internes Serenity (heartbeats, gateway)
+# sont limités à WARN par le programme pour ne pas polluer le journal.
 RUST_LOG=info
 ```
 
@@ -158,7 +154,6 @@ sudo ./uninstall_service.sh
 - [src/common.rs](src/common.rs) : État de la conversation, consigne système (l'univers Buffy), et orchestration partagée (résumé glissant, génération de l'histoire) indépendante du provider.
 - [src/gemini.rs](src/gemini.rs) : Adaptateur pour l'API REST de Gemini (génération de texte structuré JSON).
 - [src/mistral.rs](src/mistral.rs) : Adaptateur pour l'API REST de Mistral.
-- [src/image.rs](src/image.rs) : Génération d'illustrations via OpenRouter.
 - [src/main.rs](src/main.rs) : Logique du bot Discord (Serenity) — slash commands, actions de jeu, persistance des sessions par salon, déploiement.
 
 Les sessions sont stockées dans le dossier `sessions/`, un fichier JSON par salon Discord.

@@ -976,10 +976,10 @@ dependencies = [
 name = "raspberry_bot"
 version = "0.1.0"
 dependencies = [
- "base64",
  "dotenvy",
  "log",
  "pretty_env_logger",
+ "rand 0.8.7",
  "reqwest",
  "serde",
  "serde_json",

@@ -36,7 +36,11 @@ async fn call(
         None => {
             let body = serde_json::to_string(&response_json)
                 .unwrap_or_else(|_| format!("{:?}", response_json));
-            return Err(format!("Réponse Gemini inattendue (filtrage sécurité ou quota ?) : {}", body).into());
+            return Err(format!(
+                "Réponse Gemini inattendue (filtrage sécurité ou quota ?) : {}",
+                body
+            )
+            .into());
         }
     };
 
@@ -63,15 +67,44 @@ pub async fn complete_story(
                     "story_text": {
                         "type": "string",
                         "description": "Le texte décrivant la suite de l'histoire et les actions des personnages"
-                    },
-                    "scene_description": {
-                        "type": "string",
-                        "description": "English image generation prompt for visually striking scenes only; empty string otherwise"
                     }
                 },
-                "required": ["story_text", "scene_description"]
+                "required": ["story_text"]
             },
             "temperature": STORY_TEMPERATURE
+        }
+    });
+
+    call(client, api_key, payload).await
+}
+
+pub async fn complete_turn_plan(
+    client: &reqwest::Client,
+    api_key: &str,
+    system_text: &str,
+    history: &[MessageContent],
+) -> ApiResult<String> {
+    let payload = json!({
+        "contents": history,
+        "systemInstruction": { "parts": [{ "text": system_text }] },
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "object",
+                "properties": {
+                    "requires_roll": { "type": "boolean" },
+                    "modifiers": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["specialty", "ally", "wounded", "improvised"]
+                        }
+                    },
+                    "story_text": { "type": "string" }
+                },
+                "required": ["requires_roll", "modifiers", "story_text"]
+            },
+            "temperature": 0.1
         }
     });
 
@@ -82,12 +115,14 @@ pub async fn complete_story(
 pub async fn complete_text(
     client: &reqwest::Client,
     api_key: &str,
+    system_text: &str,
     prompt: &str,
     temperature: f32,
 ) -> ApiResult<String> {
     let payload = json!({
         "contents": [{ "role": "user", "parts": [{ "text": prompt }] }],
-        "generationConfig": { "temperature": temperature }
+        "systemInstruction": { "parts": [{ "text": system_text }] },
+        "generationConfig": { "responseMimeType": "application/json", "temperature": temperature }
     });
 
     call(client, api_key, payload).await

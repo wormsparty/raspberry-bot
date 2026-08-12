@@ -39,12 +39,6 @@ pub async fn complete_story(
     system_text: &str,
     history: &[MessageContent],
 ) -> ApiResult<String> {
-    // Mistral n'a pas de responseSchema : la contrainte JSON est ajoutée à la consigne système.
-    let system_text = format!(
-        "{}\n\nIMPORTANT: Tu dois impérativement répondre sous la forme d'un objet JSON contenant les clés suivantes :\n- \"story_text\" (string) : Le texte décrivant la suite de l'histoire et les actions des personnages\n- \"scene_description\" (string) : Pour les scènes visuellement fortes uniquement, un prompt d'image génératif en ANGLAIS formatté pour un générateur IA (voir instructions IMAGE PROMPT). Sinon, chaîne vide \"\".",
-        system_text
-    );
-
     let mut messages = vec![json!({
         "role": "system",
         "content": system_text
@@ -80,18 +74,51 @@ pub async fn complete_story(
     call(client, api_key, payload).await
 }
 
+pub async fn complete_turn_plan(
+    client: &reqwest::Client,
+    api_key: &str,
+    system_text: &str,
+    history: &[MessageContent],
+) -> ApiResult<String> {
+    let mut messages = vec![json!({ "role": "system", "content": system_text })];
+    for turn in history {
+        let role = match turn.role.as_str() {
+            "model" | "assistant" => "assistant",
+            _ => "user",
+        };
+        let content = turn
+            .parts
+            .iter()
+            .map(|part| part.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        messages.push(json!({ "role": role, "content": content }));
+    }
+
+    let payload = json!({
+        "model": SUMMARY_MODEL,
+        "messages": messages,
+        "response_format": { "type": "json_object" },
+        "temperature": 0.1
+    });
+    call(client, api_key, payload).await
+}
+
 // Complétion texte simple (résumés).
 pub async fn complete_text(
     client: &reqwest::Client,
     api_key: &str,
+    system_text: &str,
     prompt: &str,
     temperature: f32,
 ) -> ApiResult<String> {
     let payload = json!({
         "model": SUMMARY_MODEL,
         "messages": [
+            { "role": "system", "content": system_text },
             { "role": "user", "content": prompt }
         ],
+        "response_format": { "type": "json_object" },
         "temperature": temperature
     });
 
