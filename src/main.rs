@@ -233,60 +233,33 @@ impl Reply<'_> {
 
 // --- Boutons d'action --------------------------------------------------------
 
-// Ce que déclenche un clic. Le numéro de tour est encodé dans l'identifiant du
-// bouton : Discord laisse les anciens messages cliquables indéfiniment, un clic
-// sur les options d'un tour dépassé ne doit rien faire.
-#[derive(Debug, PartialEq)]
-enum ButtonAction {
-    // Une des options proposées, par son rang.
-    Option { turn: u64, index: usize },
-    // Le bouton « action libre », qui ouvre une fenêtre de saisie.
-    Free { turn: u64 },
-}
-
+// Un clic désigne une option par son rang. Le numéro de tour est encodé dans
+// l'identifiant du bouton : Discord laisse les anciens messages cliquables
+// indéfiniment, un clic sur les options d'un tour dépassé ne doit rien faire.
 const OPTION_PREFIX: &str = "opt";
-const FREE_PREFIX: &str = "free";
-// Champ de saisie de la fenêtre « action libre ».
-const FREE_INPUT_ID: &str = "action";
 
 fn option_button_id(turn: u64, index: usize) -> String {
     format!("{}:{}:{}", OPTION_PREFIX, turn, index)
 }
 
-fn free_button_id(turn: u64) -> String {
-    format!("{}:{}", FREE_PREFIX, turn)
-}
-
 // None pour tout identifiant qui n'est pas le nôtre.
-fn parse_button_id(custom_id: &str) -> Option<ButtonAction> {
+fn parse_option_id(custom_id: &str) -> Option<(u64, usize)> {
     let mut parts = custom_id.split(':');
-    match parts.next()? {
-        OPTION_PREFIX => {
-            let turn = parts.next()?.parse().ok()?;
-            let index = parts.next()?.parse().ok()?;
-            parts
-                .next()
-                .is_none()
-                .then_some(ButtonAction::Option { turn, index })
-        }
-        FREE_PREFIX => {
-            let turn = parts.next()?.parse().ok()?;
-            parts
-                .next()
-                .is_none()
-                .then_some(ButtonAction::Free { turn })
-        }
-        _ => None,
+    if parts.next()? != OPTION_PREFIX {
+        return None;
     }
+    let turn = parts.next()?.parse().ok()?;
+    let index = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((turn, index))
 }
 
-// Les boutons du tour : une option par proposition, plus l'action libre.
-// Sans option, pas de boutons du tout : le joueur écrit dans le salon.
+// Les boutons du tour : une option par proposition. Toute autre action s'écrit
+// dans le salon, et sans option il n'y a pas de boutons du tout.
 fn action_rows(turn: u64, options: &[String]) -> Vec<CreateActionRow> {
     if options.is_empty() {
         return Vec::new();
     }
-    let mut buttons: Vec<CreateButton> = options
+    let buttons: Vec<CreateButton> = options
         .iter()
         .enumerate()
         .take(common::MAX_STORY_OPTIONS)
@@ -296,41 +269,7 @@ fn action_rows(turn: u64, options: &[String]) -> Vec<CreateActionRow> {
                 .style(ButtonStyle::Secondary)
         })
         .collect();
-    buttons.push(
-        CreateButton::new(free_button_id(turn))
-            .label("✍️ Action libre")
-            .style(ButtonStyle::Primary),
-    );
     vec![CreateActionRow::Buttons(buttons)]
-}
-
-// La fenêtre de saisie du bouton « action libre ».
-fn free_action_modal(turn: u64) -> CreateModal {
-    CreateModal::new(free_button_id(turn), "Action libre").components(vec![
-        CreateActionRow::InputText(
-            CreateInputText::new(
-                InputTextStyle::Paragraph,
-                "Que faites-vous ?",
-                FREE_INPUT_ID,
-            )
-            .placeholder("Je pousse la porte de la réserve…")
-            .max_length(1000)
-            .required(true),
-        ),
-    ])
-}
-
-// Le texte saisi dans la fenêtre d'action libre.
-fn modal_input(data: &ModalInteractionData) -> Option<String> {
-    data.components
-        .iter()
-        .flat_map(|row| row.components.iter())
-        .find_map(|component| match component {
-            ActionRowComponent::InputText(input) if input.custom_id == FREE_INPUT_ID => {
-                input.value.clone()
-            }
-            _ => None,
-        })
 }
 
 // Ce qu'on ajoute au message quand ses boutons disparaissent : le salon garde
@@ -471,16 +410,10 @@ impl Handler {
     }
 
     // Envoie la narration et les boutons du tour, puis mémorise le message qui
-    // les porte. `owner` est le joueur pour qui les options ont été écrites.
-    async fn send_story(
-        &self,
-        reply: &Reply<'_>,
-        state: &mut ConversationState,
-        story_text: &str,
-        owner: Option<u64>,
-    ) {
+    // les porte. Les options ne visent aucun personnage : n'importe quel joueur
+    // peut cliquer, et c'est le sien qui exécutera l'action.
+    async fn send_story(&self, reply: &Reply<'_>, state: &mut ConversationState, story_text: &str) {
         let channel_id = reply.channel_id();
-        state.options_owner = owner;
         // L'aventure est sauvegardée avant l'envoi : une panne réseau sur
         // Discord ne doit pas faire perdre le tour qui vient d'être joué.
         self.save(channel_id, state).await;
@@ -512,9 +445,7 @@ impl Handler {
         let character = player.map(|(_, name)| name);
         match common::generate_story(&self.config, state, action, character).await {
             Ok(TurnOutcome::Story(story)) => {
-                let owner = player.map(|(user, _)| user.get());
-                self.send_story(reply, state, &story.story_text, owner)
-                    .await;
+                self.send_story(reply, state, &story.story_text).await;
             }
             Ok(TurnOutcome::Refused(reason)) => {
                 // L'histoire n'a pas bougé, mais le marqueur de message si.
@@ -849,7 +780,6 @@ impl EventHandler for Handler {
         match interaction {
             Interaction::Command(command) => self.handle_command(&ctx, command).await,
             Interaction::Component(component) => self.handle_component(&ctx, component).await,
-            Interaction::Modal(modal) => self.handle_modal(&ctx, modal).await,
             _ => {}
         }
     }
@@ -923,10 +853,7 @@ impl Handler {
 
                 match common::generate_story(&self.config, &mut state, &start_msg, None).await {
                     Ok(TurnOutcome::Story(story)) => {
-                        // Personne n'a encore joué : les options d'ouverture
-                        // ne visent aucun personnage en particulier.
-                        self.send_story(&reply, &mut state, &story.story_text, None)
-                            .await;
+                        self.send_story(&reply, &mut state, &story.story_text).await;
                     }
                     // Sans personnage déclaré, aucun refus n'est possible.
                     Ok(TurnOutcome::Refused(reason)) => {
@@ -1049,25 +976,28 @@ impl Handler {
 
     // Un clic sur un bouton d'action.
     async fn handle_component(&self, ctx: &Context, component: ComponentInteraction) {
-        match parse_button_id(&component.data.custom_id) {
-            // La fenêtre de saisie *est* la réponse à l'interaction : elle doit
-            // partir tout de suite, l'action arrivera à la validation.
-            Some(ButtonAction::Free { turn }) => {
-                if let Err(e) = component
-                    .create_response(
-                        &ctx.http,
-                        CreateInteractionResponse::Modal(free_action_modal(turn)),
-                    )
-                    .await
-                {
-                    log::error!("Impossible d'ouvrir la fenêtre d'action libre : {}", e);
-                }
-            }
-            Some(ButtonAction::Option { turn, index }) => {
+        match parse_option_id(&component.data.custom_id) {
+            Some((turn, index)) => {
                 self.handle_option_click(ctx, component, turn, index).await;
             }
-            // Un composant qui n'est pas de nous (ou d'une version antérieure).
-            None => log::warn!("Composant inconnu ignoré : {}", component.data.custom_id),
+            // Un composant qui n'est pas de nous, ou d'une version antérieure —
+            // l'ancien bouton « action libre », par exemple : les messages déjà
+            // envoyés restent cliquables indéfiniment.
+            None => {
+                log::warn!("Composant inconnu ignoré : {}", component.data.custom_id);
+                if component
+                    .create_response(&ctx.http, CreateInteractionResponse::Acknowledge)
+                    .await
+                    .is_ok()
+                {
+                    ephemeral(
+                        ctx,
+                        &component.token,
+                        "✍️ Ce bouton n'existe plus : écrivez votre action directement dans le salon.",
+                    )
+                    .await;
+                }
+            }
         }
     }
 
@@ -1132,22 +1062,8 @@ impl Handler {
             return;
         };
 
-        // Les options décrivent les actions d'un personnage précis : un autre
-        // joueur qui cliquerait ferait agir un personnage qui n'est pas le sien.
-        if let Some(owner) = state.options_owner.filter(|owner| *owner != user.get()) {
-            ephemeral(
-                ctx,
-                &component.token,
-                &format!(
-                    "🎭 Ces propositions ont été écrites pour le personnage de <@{}>. \
-                     Écrivez votre propre action dans le salon, ou utilisez le bouton ✍️ Action libre.",
-                    owner
-                ),
-            )
-            .await;
-            return;
-        }
-
+        // Les options ne nomment personne : le joueur qui clique est celui dont
+        // le personnage exécute l'action.
         let note = choice_note(user.get(), &character, &option);
         if consume_buttons(ctx, &component.token, &component.message, &note).await {
             forget_options_message(&mut state, component.message.id);
@@ -1155,66 +1071,6 @@ impl Handler {
 
         let reply = Reply::Channel(ctx, channel_id);
         self.play_turn(&reply, &mut state, &option, Some((user, &character)))
-            .await;
-    }
-
-    // Validation de la fenêtre « action libre ».
-    async fn handle_modal(&self, ctx: &Context, modal: ModalInteraction) {
-        if parse_button_id(&modal.data.custom_id).is_none() {
-            log::warn!("Fenêtre inconnue ignorée : {}", modal.data.custom_id);
-            return;
-        }
-        if let Err(e) = modal
-            .create_response(&ctx.http, CreateInteractionResponse::Acknowledge)
-            .await
-        {
-            log::error!("Impossible d'accuser réception de l'action libre : {}", e);
-            return;
-        }
-
-        let action = modal_input(&modal.data).unwrap_or_default();
-        let action = action.trim().to_string();
-        if action.is_empty() {
-            return;
-        }
-
-        let channel_id = modal.channel_id;
-        let lock = self.channel_lock(channel_id).await;
-        let _guard = lock.lock().await;
-
-        let Some(mut state) = self.store.load(channel_id).await else {
-            ephemeral(
-                ctx,
-                &modal.token,
-                "Aucune aventure en cours dans ce salon. Tapez /start pour commencer !",
-            )
-            .await;
-            return;
-        };
-
-        let user = modal.user.id;
-        let Some(character) = state.character_of(user.get()).map(ToOwned::to_owned) else {
-            ephemeral(
-                ctx,
-                &modal.token,
-                "🧛 Avant de jouer, dites-moi qui vous êtes avec la commande `/personnage` \
-                 (par exemple `/personnage Buffy`).",
-            )
-            .await;
-            return;
-        };
-
-        // Une action libre est toujours recevable, même écrite depuis les
-        // boutons d'un tour dépassé : seul le message qui les porte est édité.
-        if let Some(message) = modal.message.as_deref() {
-            let note = choice_note(user.get(), &character, &action);
-            if consume_buttons(ctx, &modal.token, message, &note).await {
-                forget_options_message(&mut state, message.id);
-            }
-        }
-
-        let reply = Reply::Channel(ctx, channel_id);
-        self.play_turn(&reply, &mut state, &action, Some((user, &character)))
             .await;
     }
 }
@@ -1400,8 +1256,8 @@ const HELP_TEXT: &str = "🧛 Bienvenue sur la Bouche de l'Enfer ! 🧛\n\n\
      - Tapez `/start` pour lancer une nouvelle aventure.\n\
      - **Annoncez d'abord qui vous êtes** avec `/personnage Buffy`. Tant que vous ne l'avez pas fait, vos actions sont refusées. `/personnage` sans nom affiche les personnages disponibles.\n\
      - Décrivez ensuite vos actions à la première personne : « Je pousse la porte ». Le bot sait que « je » = votre personnage.\n\
-     - Chaque narration se termine par des **boutons** : les 3 suites proposées, plus ✍️ **Action libre** pour écrire ce que vous voulez dans une fenêtre de saisie.\n\
-     - Les boutons d'un tour ne valent que pour ce tour, et seul le joueur dont c'est l'action peut les utiliser — les autres écrivent leur action dans le salon.\n\
+     - Chaque narration se termine par des **boutons** : les 3 suites proposées. Pour tout le reste, écrivez simplement votre action dans le salon.\n\
+     - Les propositions ne nomment personne : n'importe quel joueur peut cliquer, et c'est son personnage qui agit. Les boutons d'un tour ne valent que pour ce tour.\n\
      - Vous n'agissez que par votre personnage. « Je prends le bras de Giles, il est stupéfait, et il se met à pleuvoir » est valable ; « Giles ouvre la porte » sera refusé, tout comme faire agir le personnage d'un autre joueur.\n\
      - L'Observateur gère un système de dés (d20) pour les actions à enjeu : combats, rituels, filatures, négociations avec des démons...\n\
      - Préfixez un message par `/ignore` (ou `/i`, ou `!`) pour parler aux autres joueurs sans que le bot ne réagisse.\n\
@@ -1785,22 +1641,17 @@ mod tests {
 
     #[test]
     fn button_ids_round_trip() {
-        assert_eq!(
-            parse_button_id(&option_button_id(12, 2)),
-            Some(ButtonAction::Option { turn: 12, index: 2 })
-        );
-        assert_eq!(
-            parse_button_id(&free_button_id(12)),
-            Some(ButtonAction::Free { turn: 12 })
-        );
+        assert_eq!(parse_option_id(&option_button_id(12, 2)), Some((12, 2)));
 
-        // Un identifiant qui n'est pas le nôtre ne déclenche rien.
-        assert_eq!(parse_button_id("opt"), None);
-        assert_eq!(parse_button_id("opt:12"), None);
-        assert_eq!(parse_button_id("opt:12:2:3"), None);
-        assert_eq!(parse_button_id("opt:douze:2"), None);
-        assert_eq!(parse_button_id("autre:12:2"), None);
-        assert_eq!(parse_button_id(""), None);
+        // Un identifiant qui n'est pas le nôtre ne déclenche rien, y compris
+        // l'ancien bouton « action libre » resté sur un vieux message.
+        assert_eq!(parse_option_id("opt"), None);
+        assert_eq!(parse_option_id("opt:12"), None);
+        assert_eq!(parse_option_id("opt:12:2:3"), None);
+        assert_eq!(parse_option_id("opt:douze:2"), None);
+        assert_eq!(parse_option_id("autre:12:2"), None);
+        assert_eq!(parse_option_id("free:12"), None);
+        assert_eq!(parse_option_id(""), None);
     }
 
     #[test]
@@ -1811,7 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn each_option_gets_a_numbered_button_plus_the_free_action() {
+    fn each_option_gets_a_numbered_button() {
         let options = vec![
             "Forcer la porte".to_string(),
             "Attendre la nuit".to_string(),
@@ -1819,11 +1670,12 @@ mod tests {
         let rows = serde_json::to_value(action_rows(3, &options)).unwrap();
         let buttons = rows[0]["components"].as_array().unwrap();
 
-        assert_eq!(buttons.len(), 3);
+        // Une option, un bouton : rien d'autre dans la rangée.
+        assert_eq!(buttons.len(), 2);
         assert_eq!(buttons[0]["label"], "1. Forcer la porte");
         assert_eq!(buttons[0]["custom_id"], "opt:3:0");
         assert_eq!(buttons[1]["label"], "2. Attendre la nuit");
-        assert_eq!(buttons[2]["custom_id"], "free:3");
+        assert_eq!(buttons[1]["custom_id"], "opt:3:1");
 
         // Aucune option : le joueur écrit son action, sans bouton inutile.
         assert!(action_rows(3, &[]).is_empty());
