@@ -175,6 +175,13 @@ impl Reply<'_> {
 
     // Envoie un texte, découpé en plusieurs messages si nécessaire.
     async fn text(&self, content: &str) {
+        self.send(content, Vec::new()).await;
+    }
+
+    // Comme `text`, mais accroche des composants (les boutons d'action) au
+    // dernier message envoyé. Retourne l'identifiant de ce message, qui porte
+    // les boutons à retirer au tour suivant.
+    async fn send(&self, content: &str, components: Vec<CreateActionRow>) -> Option<MessageId> {
         let mut chunks = split_message(content, DISCORD_MSG_LIMIT);
         if chunks.is_empty() {
             log::warn!("Réponse vide : rien à envoyer.");
@@ -182,25 +189,218 @@ impl Reply<'_> {
             // sinon Discord affiche « réflexion… » indéfiniment.
             match self {
                 Reply::Command(..) => chunks.push("🧛 …".to_string()),
-                Reply::Channel(..) => return,
+                Reply::Channel(..) => return None,
             }
         }
-        for chunk in chunks {
+        let last = chunks.len() - 1;
+        let mut sent = None;
+        for (index, chunk) in chunks.iter().enumerate() {
+            // Les boutons ne concernent que la fin de la narration.
+            let components = if index == last {
+                components.clone()
+            } else {
+                Vec::new()
+            };
             let result = match self {
-                Reply::Channel(ctx, id) => id.say(&ctx.http, &chunk).await.map(|_| ()),
-                Reply::Command(ctx, cmd) => cmd
-                    .create_followup(
+                Reply::Channel(ctx, id) => {
+                    id.send_message(
                         &ctx.http,
-                        CreateInteractionResponseFollowup::new().content(&chunk),
+                        CreateMessage::new().content(chunk).components(components),
                     )
                     .await
-                    .map(|_| ()),
+                }
+                Reply::Command(ctx, cmd) => {
+                    cmd.create_followup(
+                        &ctx.http,
+                        CreateInteractionResponseFollowup::new()
+                            .content(chunk)
+                            .components(components),
+                    )
+                    .await
+                }
             };
-            if let Err(e) = result {
-                log::error!("Impossible d'envoyer le message Discord : {}", e);
-                return;
+            match result {
+                Ok(message) => sent = Some(message.id),
+                Err(e) => {
+                    log::error!("Impossible d'envoyer le message Discord : {}", e);
+                    return None;
+                }
             }
         }
+        sent
+    }
+}
+
+// --- Boutons d'action --------------------------------------------------------
+
+// Ce que déclenche un clic. Le numéro de tour est encodé dans l'identifiant du
+// bouton : Discord laisse les anciens messages cliquables indéfiniment, un clic
+// sur les options d'un tour dépassé ne doit rien faire.
+#[derive(Debug, PartialEq)]
+enum ButtonAction {
+    // Une des options proposées, par son rang.
+    Option { turn: u64, index: usize },
+    // Le bouton « action libre », qui ouvre une fenêtre de saisie.
+    Free { turn: u64 },
+}
+
+const OPTION_PREFIX: &str = "opt";
+const FREE_PREFIX: &str = "free";
+// Champ de saisie de la fenêtre « action libre ».
+const FREE_INPUT_ID: &str = "action";
+
+fn option_button_id(turn: u64, index: usize) -> String {
+    format!("{}:{}:{}", OPTION_PREFIX, turn, index)
+}
+
+fn free_button_id(turn: u64) -> String {
+    format!("{}:{}", FREE_PREFIX, turn)
+}
+
+// None pour tout identifiant qui n'est pas le nôtre.
+fn parse_button_id(custom_id: &str) -> Option<ButtonAction> {
+    let mut parts = custom_id.split(':');
+    match parts.next()? {
+        OPTION_PREFIX => {
+            let turn = parts.next()?.parse().ok()?;
+            let index = parts.next()?.parse().ok()?;
+            parts
+                .next()
+                .is_none()
+                .then_some(ButtonAction::Option { turn, index })
+        }
+        FREE_PREFIX => {
+            let turn = parts.next()?.parse().ok()?;
+            parts
+                .next()
+                .is_none()
+                .then_some(ButtonAction::Free { turn })
+        }
+        _ => None,
+    }
+}
+
+// Les boutons du tour : une option par proposition, plus l'action libre.
+// Sans option, pas de boutons du tout : le joueur écrit dans le salon.
+fn action_rows(turn: u64, options: &[String]) -> Vec<CreateActionRow> {
+    if options.is_empty() {
+        return Vec::new();
+    }
+    let mut buttons: Vec<CreateButton> = options
+        .iter()
+        .enumerate()
+        .take(common::MAX_STORY_OPTIONS)
+        .map(|(index, option)| {
+            CreateButton::new(option_button_id(turn, index))
+                .label(format!("{}. {}", index + 1, option))
+                .style(ButtonStyle::Secondary)
+        })
+        .collect();
+    buttons.push(
+        CreateButton::new(free_button_id(turn))
+            .label("✍️ Action libre")
+            .style(ButtonStyle::Primary),
+    );
+    vec![CreateActionRow::Buttons(buttons)]
+}
+
+// La fenêtre de saisie du bouton « action libre ».
+fn free_action_modal(turn: u64) -> CreateModal {
+    CreateModal::new(free_button_id(turn), "Action libre").components(vec![
+        CreateActionRow::InputText(
+            CreateInputText::new(
+                InputTextStyle::Paragraph,
+                "Que faites-vous ?",
+                FREE_INPUT_ID,
+            )
+            .placeholder("Je pousse la porte de la réserve…")
+            .max_length(1000)
+            .required(true),
+        ),
+    ])
+}
+
+// Le texte saisi dans la fenêtre d'action libre.
+fn modal_input(data: &ModalInteractionData) -> Option<String> {
+    data.components
+        .iter()
+        .flat_map(|row| row.components.iter())
+        .find_map(|component| match component {
+            ActionRowComponent::InputText(input) if input.custom_id == FREE_INPUT_ID => {
+                input.value.clone()
+            }
+            _ => None,
+        })
+}
+
+// Ce qu'on ajoute au message quand ses boutons disparaissent : le salon garde
+// une trace de l'action choisie, comme si elle avait été écrite.
+fn choice_note(user: u64, character: &str, action: &str) -> String {
+    format!("\n\n> 🎭 **{}** (<@{}>) — {}", character, user, action)
+}
+
+// Retire les boutons du tour précédent. Le numéro de tour suffirait à les
+// rendre inopérants, mais des boutons morts qui restent cliquables invitent à
+// cliquer dessus.
+async fn clear_options_buttons(
+    ctx: &Context,
+    channel_id: ChannelId,
+    state: &mut ConversationState,
+) {
+    let Some(message_id) = state.options_message_id.take() else {
+        return;
+    };
+    if let Err(e) = channel_id
+        .edit_message(
+            &ctx.http,
+            MessageId::new(message_id),
+            EditMessage::new().components(Vec::new()),
+        )
+        .await
+    {
+        log::warn!(
+            "Impossible de retirer les boutons du message {} : {}",
+            message_id,
+            e
+        );
+    }
+}
+
+// Retire les boutons du message d'où vient l'interaction et y consigne l'action
+// retenue, pour que le salon garde la trace du choix. Retourne false si Discord
+// a refusé l'édition : les boutons restent alors affichés, mais le numéro de
+// tour encodé dedans les a déjà rendus inopérants.
+async fn consume_buttons(ctx: &Context, token: &str, message: &Message, note: &str) -> bool {
+    let mut edit = EditInteractionResponse::new().components(Vec::new());
+    // Un message Discord ne dépasse pas 2000 caractères : si la note ne tient
+    // pas, on se contente de retirer les boutons.
+    if message.content.chars().count() + note.chars().count() <= DISCORD_MSG_LIMIT {
+        edit = edit.content(format!("{}{}", message.content, note));
+    }
+    match edit.execute(&ctx.http, token).await {
+        Ok(_) => true,
+        Err(e) => {
+            log::warn!("Impossible de retirer les boutons après le choix : {}", e);
+            false
+        }
+    }
+}
+
+// Une réponse que seul le joueur qui a cliqué voit passer.
+async fn ephemeral(ctx: &Context, token: &str, content: &str) {
+    let followup = CreateInteractionResponseFollowup::new()
+        .content(content)
+        .ephemeral(true);
+    if let Err(e) = followup.execute(&ctx.http, (None, token)).await {
+        log::warn!("Impossible de répondre au joueur : {}", e);
+    }
+}
+
+// Après un clic, c'est l'interaction qui a retiré les boutons : l'application
+// n'a plus à le faire, mais seulement si le clic vient bien du message courant.
+fn forget_options_message(state: &mut ConversationState, message_id: MessageId) {
+    if state.options_message_id == Some(message_id.get()) {
+        state.options_message_id = None;
     }
 }
 
@@ -270,6 +470,33 @@ impl Handler {
         }
     }
 
+    // Envoie la narration et les boutons du tour, puis mémorise le message qui
+    // les porte. `owner` est le joueur pour qui les options ont été écrites.
+    async fn send_story(
+        &self,
+        reply: &Reply<'_>,
+        state: &mut ConversationState,
+        story_text: &str,
+        owner: Option<u64>,
+    ) {
+        let channel_id = reply.channel_id();
+        state.options_owner = owner;
+        // L'aventure est sauvegardée avant l'envoi : une panne réseau sur
+        // Discord ne doit pas faire perdre le tour qui vient d'être joué.
+        self.save(channel_id, state).await;
+
+        clear_options_buttons(reply.ctx(), channel_id, state).await;
+        let components = action_rows(state.turn, &state.pending_options);
+        let has_buttons = !components.is_empty();
+        let sent = reply.send(story_text, components).await;
+        state.options_message_id = if has_buttons {
+            sent.map(MessageId::get)
+        } else {
+            None
+        };
+        self.save(channel_id, state).await;
+    }
+
     // Traite une action de jeu (texte libre) pour un salon donné. Le personnage
     // est celui déclaré par l'auteur du message : c'est lui que désigne « je ».
     async fn play_turn(
@@ -277,15 +504,17 @@ impl Handler {
         reply: &Reply<'_>,
         state: &mut ConversationState,
         action: &str,
-        character: Option<&str>,
+        player: Option<(UserId, &str)>,
     ) {
         let channel_id = reply.channel_id();
         reply.typing().await;
 
+        let character = player.map(|(_, name)| name);
         match common::generate_story(&self.config, state, action, character).await {
             Ok(TurnOutcome::Story(story)) => {
-                self.save(channel_id, state).await;
-                reply.text(&story.story_text).await;
+                let owner = player.map(|(user, _)| user.get());
+                self.send_story(reply, state, &story.story_text, owner)
+                    .await;
             }
             Ok(TurnOutcome::Refused(reason)) => {
                 // L'histoire n'a pas bougé, mais le marqueur de message si.
@@ -354,7 +583,8 @@ impl Handler {
             return;
         };
 
-        self.play_turn(reply, state, text, Some(&character)).await;
+        self.play_turn(reply, state, text, Some((author, &character)))
+            .await;
     }
 
     // --- Rattrapage des messages reçus hors ligne ---------------------------
@@ -616,10 +846,17 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        let Interaction::Command(command) = interaction else {
-            return;
-        };
+        match interaction {
+            Interaction::Command(command) => self.handle_command(&ctx, command).await,
+            Interaction::Component(component) => self.handle_component(&ctx, component).await,
+            Interaction::Modal(modal) => self.handle_modal(&ctx, modal).await,
+            _ => {}
+        }
+    }
+}
 
+impl Handler {
+    async fn handle_command(&self, ctx: &Context, command: CommandInteraction) {
         // La génération peut prendre bien plus que les 3 secondes autorisées
         // pour une réponse immédiate : on diffère systématiquement.
         if let Err(e) = command.defer(&ctx.http).await {
@@ -627,7 +864,7 @@ impl EventHandler for Handler {
             return;
         }
 
-        let reply = Reply::Command(&ctx, &command);
+        let reply = Reply::Command(ctx, &command);
         let options = command.data.options();
 
         match command.data.name.as_str() {
@@ -643,6 +880,13 @@ impl EventHandler for Handler {
                         .as_ref()
                         .map(|s| s.characters.clone())
                         .unwrap_or_default(),
+                    // Le compteur de tours ne repart pas de zéro : sinon les
+                    // boutons de l'aventure précédente, toujours cliquables,
+                    // finiraient par désigner des options de la nouvelle.
+                    turn: previous.as_ref().map(|s| s.turn).unwrap_or_default(),
+                    // Repris pour que ces boutons-là soient retirés à l'envoi
+                    // de la première narration.
+                    options_message_id: previous.as_ref().and_then(|s| s.options_message_id),
                     ..Default::default()
                 };
 
@@ -666,7 +910,7 @@ impl EventHandler for Handler {
                     .await;
                 // Le rattrapage ne doit jamais rejouer les messages de
                 // l'aventure précédente : le marqueur repart du présent.
-                state.last_message_id = newest_message_id(&ctx, command.channel_id).await;
+                state.last_message_id = newest_message_id(ctx, command.channel_id).await;
                 if !roster.is_empty() {
                     reply
                         .text(&format!(
@@ -679,10 +923,10 @@ impl EventHandler for Handler {
 
                 match common::generate_story(&self.config, &mut state, &start_msg, None).await {
                     Ok(TurnOutcome::Story(story)) => {
-                        if let Err(e) = self.store.save(command.channel_id, &state).await {
-                            log::error!("Impossible de sauvegarder la session : {}", e);
-                        }
-                        reply.text(&story.story_text).await;
+                        // Personne n'a encore joué : les options d'ouverture
+                        // ne visent aucun personnage en particulier.
+                        self.send_story(&reply, &mut state, &story.story_text, None)
+                            .await;
                     }
                     // Sans personnage déclaré, aucun refus n'est possible.
                     Ok(TurnOutcome::Refused(reason)) => {
@@ -801,6 +1045,177 @@ impl EventHandler for Handler {
                     .await;
             }
         }
+    }
+
+    // Un clic sur un bouton d'action.
+    async fn handle_component(&self, ctx: &Context, component: ComponentInteraction) {
+        match parse_button_id(&component.data.custom_id) {
+            // La fenêtre de saisie *est* la réponse à l'interaction : elle doit
+            // partir tout de suite, l'action arrivera à la validation.
+            Some(ButtonAction::Free { turn }) => {
+                if let Err(e) = component
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Modal(free_action_modal(turn)),
+                    )
+                    .await
+                {
+                    log::error!("Impossible d'ouvrir la fenêtre d'action libre : {}", e);
+                }
+            }
+            Some(ButtonAction::Option { turn, index }) => {
+                self.handle_option_click(ctx, component, turn, index).await;
+            }
+            // Un composant qui n'est pas de nous (ou d'une version antérieure).
+            None => log::warn!("Composant inconnu ignoré : {}", component.data.custom_id),
+        }
+    }
+
+    async fn handle_option_click(
+        &self,
+        ctx: &Context,
+        component: ComponentInteraction,
+        turn: u64,
+        index: usize,
+    ) {
+        // Discord invalide l'interaction au bout de 3 secondes : on accuse
+        // réception avant tout le reste, car le verrou du salon peut être tenu
+        // par un tour en cours de génération. `Acknowledge` ne change rien à
+        // l'écran du joueur : le message et ses boutons sont édités ensuite.
+        if let Err(e) = component
+            .create_response(&ctx.http, CreateInteractionResponse::Acknowledge)
+            .await
+        {
+            log::error!("Impossible d'accuser réception du clic : {}", e);
+            return;
+        }
+
+        let channel_id = component.channel_id;
+        let lock = self.channel_lock(channel_id).await;
+        let _guard = lock.lock().await;
+
+        let Some(mut state) = self.store.load(channel_id).await else {
+            ephemeral(
+                ctx,
+                &component.token,
+                "Aucune aventure en cours dans ce salon. Tapez /start pour commencer !",
+            )
+            .await;
+            return;
+        };
+
+        // L'histoire a avancé depuis : ces options ne sont plus les siennes.
+        let option = state
+            .pending_options
+            .get(index)
+            .filter(|_| turn == state.turn)
+            .cloned();
+        let Some(option) = option else {
+            ephemeral(
+                ctx,
+                &component.token,
+                "🕯️ Ces propositions appartiennent à un tour déjà passé. Utilisez les boutons du dernier message, ou écrivez votre action.",
+            )
+            .await;
+            return;
+        };
+
+        let user = component.user.id;
+        let Some(character) = state.character_of(user.get()).map(ToOwned::to_owned) else {
+            ephemeral(
+                ctx,
+                &component.token,
+                "🧛 Avant de jouer, dites-moi qui vous êtes avec la commande `/personnage` \
+                 (par exemple `/personnage Buffy`).",
+            )
+            .await;
+            return;
+        };
+
+        // Les options décrivent les actions d'un personnage précis : un autre
+        // joueur qui cliquerait ferait agir un personnage qui n'est pas le sien.
+        if let Some(owner) = state.options_owner.filter(|owner| *owner != user.get()) {
+            ephemeral(
+                ctx,
+                &component.token,
+                &format!(
+                    "🎭 Ces propositions ont été écrites pour le personnage de <@{}>. \
+                     Écrivez votre propre action dans le salon, ou utilisez le bouton ✍️ Action libre.",
+                    owner
+                ),
+            )
+            .await;
+            return;
+        }
+
+        let note = choice_note(user.get(), &character, &option);
+        if consume_buttons(ctx, &component.token, &component.message, &note).await {
+            forget_options_message(&mut state, component.message.id);
+        }
+
+        let reply = Reply::Channel(ctx, channel_id);
+        self.play_turn(&reply, &mut state, &option, Some((user, &character)))
+            .await;
+    }
+
+    // Validation de la fenêtre « action libre ».
+    async fn handle_modal(&self, ctx: &Context, modal: ModalInteraction) {
+        if parse_button_id(&modal.data.custom_id).is_none() {
+            log::warn!("Fenêtre inconnue ignorée : {}", modal.data.custom_id);
+            return;
+        }
+        if let Err(e) = modal
+            .create_response(&ctx.http, CreateInteractionResponse::Acknowledge)
+            .await
+        {
+            log::error!("Impossible d'accuser réception de l'action libre : {}", e);
+            return;
+        }
+
+        let action = modal_input(&modal.data).unwrap_or_default();
+        let action = action.trim().to_string();
+        if action.is_empty() {
+            return;
+        }
+
+        let channel_id = modal.channel_id;
+        let lock = self.channel_lock(channel_id).await;
+        let _guard = lock.lock().await;
+
+        let Some(mut state) = self.store.load(channel_id).await else {
+            ephemeral(
+                ctx,
+                &modal.token,
+                "Aucune aventure en cours dans ce salon. Tapez /start pour commencer !",
+            )
+            .await;
+            return;
+        };
+
+        let user = modal.user.id;
+        let Some(character) = state.character_of(user.get()).map(ToOwned::to_owned) else {
+            ephemeral(
+                ctx,
+                &modal.token,
+                "🧛 Avant de jouer, dites-moi qui vous êtes avec la commande `/personnage` \
+                 (par exemple `/personnage Buffy`).",
+            )
+            .await;
+            return;
+        };
+
+        // Une action libre est toujours recevable, même écrite depuis les
+        // boutons d'un tour dépassé : seul le message qui les porte est édité.
+        if let Some(message) = modal.message.as_deref() {
+            let note = choice_note(user.get(), &character, &action);
+            if consume_buttons(ctx, &modal.token, message, &note).await {
+                forget_options_message(&mut state, message.id);
+            }
+        }
+
+        let reply = Reply::Channel(ctx, channel_id);
+        self.play_turn(&reply, &mut state, &action, Some((user, &character)))
+            .await;
     }
 }
 
@@ -985,6 +1400,8 @@ const HELP_TEXT: &str = "🧛 Bienvenue sur la Bouche de l'Enfer ! 🧛\n\n\
      - Tapez `/start` pour lancer une nouvelle aventure.\n\
      - **Annoncez d'abord qui vous êtes** avec `/personnage Buffy`. Tant que vous ne l'avez pas fait, vos actions sont refusées. `/personnage` sans nom affiche les personnages disponibles.\n\
      - Décrivez ensuite vos actions à la première personne : « Je pousse la porte ». Le bot sait que « je » = votre personnage.\n\
+     - Chaque narration se termine par des **boutons** : les 3 suites proposées, plus ✍️ **Action libre** pour écrire ce que vous voulez dans une fenêtre de saisie.\n\
+     - Les boutons d'un tour ne valent que pour ce tour, et seul le joueur dont c'est l'action peut les utiliser — les autres écrivent leur action dans le salon.\n\
      - Vous n'agissez que par votre personnage. « Je prends le bras de Giles, il est stupéfait, et il se met à pleuvoir » est valable ; « Giles ouvre la porte » sera refusé, tout comme faire agir le personnage d'un autre joueur.\n\
      - L'Observateur gère un système de dés (d20) pour les actions à enjeu : combats, rituels, filatures, négociations avec des démons...\n\
      - Préfixez un message par `/ignore` (ou `/i`, ou `!`) pour parler aux autres joueurs sans que le bot ne réagisse.\n\
@@ -1364,5 +1781,84 @@ mod tests {
     #[test]
     fn empty_text_produces_no_message() {
         assert!(split_message("   \n\n", DISCORD_MSG_LIMIT).is_empty());
+    }
+
+    #[test]
+    fn button_ids_round_trip() {
+        assert_eq!(
+            parse_button_id(&option_button_id(12, 2)),
+            Some(ButtonAction::Option { turn: 12, index: 2 })
+        );
+        assert_eq!(
+            parse_button_id(&free_button_id(12)),
+            Some(ButtonAction::Free { turn: 12 })
+        );
+
+        // Un identifiant qui n'est pas le nôtre ne déclenche rien.
+        assert_eq!(parse_button_id("opt"), None);
+        assert_eq!(parse_button_id("opt:12"), None);
+        assert_eq!(parse_button_id("opt:12:2:3"), None);
+        assert_eq!(parse_button_id("opt:douze:2"), None);
+        assert_eq!(parse_button_id("autre:12:2"), None);
+        assert_eq!(parse_button_id(""), None);
+    }
+
+    #[test]
+    fn button_ids_stay_within_the_discord_limit() {
+        // Discord refuse un custom_id de plus de 100 caractères.
+        let id = option_button_id(u64::MAX, common::MAX_STORY_OPTIONS);
+        assert!(id.len() <= 100, "identifiant trop long : {}", id);
+    }
+
+    #[test]
+    fn each_option_gets_a_numbered_button_plus_the_free_action() {
+        let options = vec![
+            "Forcer la porte".to_string(),
+            "Attendre la nuit".to_string(),
+        ];
+        let rows = serde_json::to_value(action_rows(3, &options)).unwrap();
+        let buttons = rows[0]["components"].as_array().unwrap();
+
+        assert_eq!(buttons.len(), 3);
+        assert_eq!(buttons[0]["label"], "1. Forcer la porte");
+        assert_eq!(buttons[0]["custom_id"], "opt:3:0");
+        assert_eq!(buttons[1]["label"], "2. Attendre la nuit");
+        assert_eq!(buttons[2]["custom_id"], "free:3");
+
+        // Aucune option : le joueur écrit son action, sans bouton inutile.
+        assert!(action_rows(3, &[]).is_empty());
+    }
+
+    #[test]
+    fn button_labels_fit_the_discord_limit() {
+        // 80 caractères maximum, numérotation comprise.
+        let options = common::sanitize_options(&["Buffy ".repeat(40)]);
+        let rows = serde_json::to_value(action_rows(1, &options)).unwrap();
+        let label = rows[0]["components"][0]["label"].as_str().unwrap();
+        assert!(label.chars().count() <= 80, "libellé trop long : {}", label);
+    }
+
+    #[test]
+    fn a_choice_is_recorded_under_the_message() {
+        let note = choice_note(1234, "Buffy", "Buffy force la porte");
+        assert!(note.contains("**Buffy**"));
+        assert!(note.contains("<@1234>"));
+        assert!(note.contains("Buffy force la porte"));
+    }
+
+    #[test]
+    fn only_the_current_options_message_is_forgotten() {
+        let mut state = ConversationState {
+            options_message_id: Some(42),
+            ..Default::default()
+        };
+
+        // Un clic sur les boutons d'un ancien message ne doit pas faire oublier
+        // ceux du tour en cours, qui restent à retirer.
+        forget_options_message(&mut state, MessageId::new(7));
+        assert_eq!(state.options_message_id, Some(42));
+
+        forget_options_message(&mut state, MessageId::new(42));
+        assert_eq!(state.options_message_id, None);
     }
 }

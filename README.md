@@ -11,6 +11,7 @@ Le bot utilise l'API **Gemini** ou **Mistral** pour la narration (avec un schém
 - **Narrateur interactif** : le LLM joue le rôle d'Observateur / Maître de Jeu et décrit les conséquences de vos actions, dés à 20 faces à l'appui.
 - **Mode multijoueur** : une aventure par **salon Discord**. Tous les joueurs d'un même salon partagent la même histoire et jouent à tour de rôle.
 - **Un joueur, un personnage** : chaque joueur annonce qui il incarne, et le bot traduit son « je » par le nom du personnage pour le narrateur.
+- **Choix par boutons** : chaque narration se termine par les 3 suites possibles sous forme de boutons cliquables, plus un bouton ✍️ **Action libre** qui ouvre une fenêtre de saisie.
 - **Rattrapage après une coupure** : au redémarrage, le bot relit l'historique du salon et joue les actions reçues pendant son absence.
 - **Slash commands** :
   - `/start [etat]` : Démarre une nouvelle aventure. Vous pouvez spécifier un état initial (ex : `/start etat:Nous sommes au cimetière, il fait nuit`), par exemple obtenu via `/summary`.
@@ -37,7 +38,18 @@ Un joueur n'agit que **par son personnage** :
 
 Un même personnage ne peut être incarné que par un seul joueur, et `/personnage` sert aussi à en changer en cours de partie. Les personnages déclarés sont conservés lors d'un nouveau `/start`.
 
-En retour, la narration **nomme qui fait quoi** : comme tout le salon lit le même texte, le narrateur écrit « Buffy s'approche du concierge » plutôt que « Tu t'approches du concierge », et attribue de la même façon les actions des autres personnages et des PNJ. Les 3 options numérotées de fin de tour sont formulées au nom du personnage dont c'est le tour.
+En retour, la narration **nomme qui fait quoi** : comme tout le salon lit le même texte, le narrateur écrit « Buffy s'approche du concierge » plutôt que « Tu t'approches du concierge », et attribue de la même façon les actions des autres personnages et des PNJ. Les 3 options de fin de tour sont formulées au nom du personnage dont c'est le tour.
+
+### Choisir son action : les boutons
+
+Chaque narration est suivie d'une rangée de boutons : les **3 suites proposées** par le narrateur, numérotées, et **✍️ Action libre**.
+
+- Cliquer sur une proposition la joue immédiatement comme action de votre personnage. Le message est alors édité : les boutons disparaissent et le choix reste inscrit dessous (« 🎭 **Buffy** — Buffy force la porte »), pour que le salon voie qui a décidé quoi.
+- **✍️ Action libre** ouvre une fenêtre de saisie : c'est l'équivalent d'un message écrit dans le salon, utile quand aucune proposition ne convient. Écrire directement dans le salon reste évidemment possible.
+- Les propositions décrivent les actions d'**un** personnage : seul le joueur dont c'est l'action peut cliquer dessus. Les autres écrivent leur propre action, ou passent par l'action libre.
+- Les boutons ne valent que pour le tour où ils ont été proposés. Dès qu'un tour est joué — par un clic ou par un message — ceux du tour précédent sont retirés, et un clic tardif reçoit un simple rappel visible du seul joueur concerné.
+
+Si le modèle ne renvoie aucune proposition, la narration est envoyée sans bouton : le jeu continue en écrivant dans le salon.
 
 ### Comment le bot lit les messages
 

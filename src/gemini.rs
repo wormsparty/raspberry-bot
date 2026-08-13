@@ -67,9 +67,14 @@ pub async fn complete_story(
                     "story_text": {
                         "type": "string",
                         "description": "Le texte décrivant la suite de l'histoire et les actions des personnages"
+                    },
+                    "options": {
+                        "type": "array",
+                        "description": "Les 3 suites possibles proposées au joueur, sans numérotation, 76 caractères maximum chacune",
+                        "items": { "type": "string" }
                     }
                 },
-                "required": ["story_text"]
+                "required": ["story_text", "options"]
             },
             "temperature": STORY_TEMPERATURE
         }
@@ -102,14 +107,19 @@ pub async fn complete_turn_plan(
                             "enum": ["specialty", "ally", "wounded", "improvised"]
                         }
                     },
-                    "story_text": { "type": "string" }
+                    "story_text": { "type": "string" },
+                    "options": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
                 },
                 "required": [
                     "action_allowed",
                     "refusal_reason",
                     "requires_roll",
                     "modifiers",
-                    "story_text"
+                    "story_text",
+                    "options"
                 ]
             },
             "temperature": 0.1
