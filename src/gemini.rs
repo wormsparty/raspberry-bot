@@ -92,6 +92,8 @@ pub async fn complete_turn_plan(
             "responseSchema": {
                 "type": "object",
                 "properties": {
+                    "action_allowed": { "type": "boolean" },
+                    "refusal_reason": { "type": "string" },
                     "requires_roll": { "type": "boolean" },
                     "modifiers": {
                         "type": "array",
@@ -102,7 +104,13 @@ pub async fn complete_turn_plan(
                     },
                     "story_text": { "type": "string" }
                 },
-                "required": ["requires_roll", "modifiers", "story_text"]
+                "required": [
+                    "action_allowed",
+                    "refusal_reason",
+                    "requires_roll",
+                    "modifiers",
+                    "story_text"
+                ]
             },
             "temperature": 0.1
         }

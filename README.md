@@ -10,12 +10,32 @@ Le bot utilise l'API **Gemini** ou **Mistral** pour la narration (avec un schém
 
 - **Narrateur interactif** : le LLM joue le rôle d'Observateur / Maître de Jeu et décrit les conséquences de vos actions, dés à 20 faces à l'appui.
 - **Mode multijoueur** : une aventure par **salon Discord**. Tous les joueurs d'un même salon partagent la même histoire et jouent à tour de rôle.
+- **Un joueur, un personnage** : chaque joueur annonce qui il incarne, et le bot traduit son « je » par le nom du personnage pour le narrateur.
+- **Rattrapage après une coupure** : au redémarrage, le bot relit l'historique du salon et joue les actions reçues pendant son absence.
 - **Slash commands** :
   - `/start [etat]` : Démarre une nouvelle aventure. Vous pouvez spécifier un état initial (ex : `/start etat:Nous sommes au cimetière, il fait nuit`), par exemple obtenu via `/summary`.
+  - `/personnage [nom]` : Annonce le personnage que vous incarnez (texte libre) ; sans argument, rappelle qui vous êtes et propose des personnages.
   - `/summary` : Génère le journal de l'Observateur, réutilisable comme état initial de `/start` (sur ce bot ou ailleurs).
   - `/model gemini|mistral` : Change le modèle utilisé pour la suite de l'aventure (nécessite la clé API correspondante).
   - `/deploy [force]` : Déploie la dernière version du bot (réservé à l'admin, voir `ADMIN_USER_ID`).
   - `/help` : Affiche l'aide et les commandes.
+
+### Qui est « je » ? — personnages et règle d'action
+
+Pour éviter la confusion entre le joueur, son personnage et les autres, chaque joueur doit **s'annoncer avant de pouvoir faire avancer l'histoire** :
+
+1. Tapez `/personnage Buffy` (le nom est du texte libre : un personnage de la série ou le vôtre). Le bot mémorise que votre identifiant Discord correspond à ce personnage, et cette association est sauvegardée avec la partie.
+2. Tant que vous ne l'avez pas fait, **vos messages sont refusés** et le bot vous renvoie vers `/personnage`. Rien n'est deviné à partir du texte de vos messages : l'identité ne se déclare que par la commande.
+3. `/personnage` sans nom rappelle qui vous incarnez, qui sont les autres joueurs, et propose quelques figures de Sunnydale (Buffy, Giles, Willow, Angel…) avec une courte présentation.
+4. Une fois annoncé, écrivez vos actions à la première personne : « Je pousse la porte » est transmis au narrateur comme « **Buffy** pousse la porte ».
+
+Un joueur n'agit que **par son personnage** :
+
+- ✅ « Je prends le bras de Giles, il est stupéfait, et il se met à pleuvoir dehors » — l'action est celle de votre personnage ; le décor, l'ambiance et les réactions des PNJ restent libres.
+- ❌ « Giles passe la porte » — aucune action de votre personnage : la demande est refusée.
+- ❌ Faire agir ou parler le personnage d'un **autre joueur** : refusé également.
+
+Un même personnage ne peut être incarné que par un seul joueur, et `/personnage` sert aussi à en changer en cours de partie. Les personnages déclarés sont conservés lors d'un nouveau `/start`.
 
 ### Comment le bot lit les messages
 
@@ -25,6 +45,17 @@ Une fois `/start` lancé dans un salon, **tout message normal du salon est inter
 - ou **répondez** (reply) à un message : les réponses ne sont jamais interprétées comme des actions.
 
 Tant qu'aucune aventure n'a été lancée dans un salon, le bot reste totalement silencieux.
+
+### Messages reçus pendant une coupure
+
+Discord ne rejoue pas les messages envoyés pendant qu'un bot est hors ligne. Le bot mémorise donc, dans la session du salon, l'identifiant du dernier message traité ; à chaque (re)connexion, il relit l'historique du salon depuis ce marqueur et joue les actions manquées. Le rattrapage ne s'annonce pas dans le salon : les joueurs voient simplement la suite de l'histoire arriver (le détail est écrit dans les logs).
+
+Deux garde-fous évitent de noyer le salon après une longue panne (réglables dans le `.env`) :
+
+- `CATCHUP_LIMIT` (défaut : 20) : nombre maximum d'actions rejouées par salon ; seules les plus récentes sont jouées.
+- `CATCHUP_MAX_AGE_HOURS` (défaut : 24) : les messages plus anciens sont ignorés.
+
+Le rattrapage nécessite la permission Discord **Read Message History**. Les sessions créées avant cette fonctionnalité n'ont pas de marqueur : le bot se cale alors sur le présent sans rejouer l'historique.
 
 ---
 
@@ -75,6 +106,11 @@ ADMIN_USER_ID=123456789012345678
 
 # Nom du service systemd redémarré par /deploy (facultatif, défaut: raspberry-bot)
 #SERVICE_NAME=raspberry-bot
+
+# Rattrapage des messages reçus pendant que le bot était hors ligne (facultatif).
+# Nombre maximum d'actions rejouées par salon, et âge maximum d'un message rejoué.
+#CATCHUP_LIMIT=20
+#CATCHUP_MAX_AGE_HOURS=24
 
 # Niveau de log pour le bot. Les spans internes Serenity (heartbeats, gateway)
 # sont limités à WARN par le programme pour ne pas polluer le journal.
@@ -151,9 +187,9 @@ sudo ./uninstall_service.sh
 ## 🔍 Structure du Code
 
 - [Cargo.toml](Cargo.toml) : Gère les dépendances (Serenity, Reqwest, Serde, Tokio).
-- [src/common.rs](src/common.rs) : État de la conversation, consigne système (l'univers Buffy), et orchestration partagée (résumé glissant, génération de l'histoire) indépendante du provider.
+- [src/common.rs](src/common.rs) : État de la conversation (personnages déclarés, marqueur de rattrapage), consigne système (l'univers Buffy, les règles d'identité), et orchestration partagée (résumé glissant, génération de l'histoire) indépendante du provider.
 - [src/gemini.rs](src/gemini.rs) : Adaptateur pour l'API REST de Gemini (génération de texte structuré JSON).
 - [src/mistral.rs](src/mistral.rs) : Adaptateur pour l'API REST de Mistral.
-- [src/main.rs](src/main.rs) : Logique du bot Discord (Serenity) — slash commands, actions de jeu, persistance des sessions par salon, déploiement.
+- [src/main.rs](src/main.rs) : Logique du bot Discord (Serenity) — slash commands, actions de jeu, déclaration des personnages, rattrapage des messages manqués, persistance des sessions par salon, déploiement.
 
 Les sessions sont stockées dans le dossier `sessions/`, un fichier JSON par salon Discord.

@@ -5,18 +5,39 @@ mod mistral;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serenity::all::*;
 use serenity::async_trait;
 use serenity::Client as SerenityClient;
 use tokio::sync::Mutex;
 
-use common::{Config, ConversationState, ModelProvider};
+use common::{Config, ConversationState, ModelProvider, TurnOutcome};
 
 // Limite de taille d'un message Discord.
 const DISCORD_MSG_LIMIT: usize = 2000;
+
+// Rattrapage des messages reçus pendant que le bot était hors ligne.
+// On ne rejoue ni un historique trop ancien, ni un trop grand nombre d'actions :
+// le salon serait noyé sous des dizaines de narrations d'un coup.
+const DEFAULT_CATCHUP_LIMIT: usize = 20;
+const DEFAULT_CATCHUP_MAX_AGE_HOURS: i64 = 24;
+
+fn catchup_limit() -> usize {
+    std::env::var("CATCHUP_LIMIT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_CATCHUP_LIMIT)
+}
+
+fn catchup_max_age_hours() -> i64 {
+    std::env::var("CATCHUP_MAX_AGE_HOURS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_CATCHUP_MAX_AGE_HOURS)
+}
 
 // Nom du service systemd, surchargeable pour les installations non standard.
 fn service_name() -> String {
@@ -61,6 +82,28 @@ impl SessionStore {
 
     fn path(&self, channel_id: ChannelId) -> PathBuf {
         self.dir.join(format!("{}.json", channel_id.get()))
+    }
+
+    // Salons ayant une aventure en cours, pour le rattrapage au démarrage.
+    fn channels(&self) -> Vec<ChannelId> {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                log::error!("Impossible de lister les sessions : {}", e);
+                return Vec::new();
+            }
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .filter_map(|path| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .and_then(|stem| stem.parse::<u64>().ok())
+                    .map(ChannelId::new)
+            })
+            .collect()
     }
 
     async fn load(&self, channel_id: ChannelId) -> Option<ConversationState> {
@@ -207,6 +250,9 @@ struct Handler {
     // Un verrou par salon : deux joueurs qui écrivent en même temps ne doivent
     // pas écraser mutuellement l'état de l'aventure.
     locks: Mutex<HashMap<ChannelId, Arc<Mutex<()>>>>,
+    // Le rattrapage tourne au plus une fois à la fois (`ready` est réémis à
+    // chaque reconnexion complète à la gateway).
+    catching_up: AtomicBool,
 }
 
 impl Handler {
@@ -218,17 +264,33 @@ impl Handler {
             .clone()
     }
 
-    // Traite une action de jeu (texte libre) pour un salon donné.
-    async fn play_turn(&self, reply: &Reply<'_>, mut state: ConversationState, action: &str) {
+    async fn save(&self, channel_id: ChannelId, state: &ConversationState) {
+        if let Err(e) = self.store.save(channel_id, state).await {
+            log::error!("Impossible de sauvegarder la session : {}", e);
+        }
+    }
+
+    // Traite une action de jeu (texte libre) pour un salon donné. Le personnage
+    // est celui déclaré par l'auteur du message : c'est lui que désigne « je ».
+    async fn play_turn(
+        &self,
+        reply: &Reply<'_>,
+        state: &mut ConversationState,
+        action: &str,
+        character: Option<&str>,
+    ) {
         let channel_id = reply.channel_id();
         reply.typing().await;
 
-        match common::generate_story(&self.config, &mut state, action).await {
-            Ok(story) => {
-                if let Err(e) = self.store.save(channel_id, &state).await {
-                    log::error!("Impossible de sauvegarder la session : {}", e);
-                }
+        match common::generate_story(&self.config, state, action, character).await {
+            Ok(TurnOutcome::Story(story)) => {
+                self.save(channel_id, state).await;
                 reply.text(&story.story_text).await;
+            }
+            Ok(TurnOutcome::Refused(reason)) => {
+                // L'histoire n'a pas bougé, mais le marqueur de message si.
+                self.save(channel_id, state).await;
+                reply.text(&format!("⛔ {}", reason)).await;
             }
             Err(e) => {
                 log::error!("Erreur lors de la génération de l'histoire : {}", e);
@@ -238,6 +300,176 @@ impl Handler {
             }
         }
     }
+
+    // Résout l'identité de l'auteur puis joue son tour. Un joueur qui ne s'est
+    // pas annoncé ne peut pas faire avancer l'histoire.
+    async fn handle_player_message(
+        &self,
+        reply: &Reply<'_>,
+        state: &mut ConversationState,
+        author: UserId,
+        text: &str,
+    ) {
+        let channel_id = reply.channel_id();
+        let user = author.get();
+
+        let Some(character) = state.character_of(user).map(ToOwned::to_owned) else {
+            // Joueur inconnu : rien n'est deviné à partir de son message,
+            // l'identité se déclare uniquement avec /personnage.
+            self.save(channel_id, state).await;
+            reply
+                .text(&format!(
+                    "🧛 <@{}>, avant de jouer, dis-moi qui tu es avec la commande `/personnage` \
+                     (par exemple `/personnage Buffy`). Tape `/personnage` sans rien préciser pour voir les personnages disponibles.",
+                    user
+                ))
+                .await;
+            return;
+        };
+
+        self.play_turn(reply, state, text, Some(&character)).await;
+    }
+
+    // --- Rattrapage des messages reçus hors ligne ---------------------------
+
+    async fn catch_up(&self, ctx: &Context) {
+        if self.catching_up.swap(true, Ordering::SeqCst) {
+            log::info!("Rattrapage déjà en cours, celui-ci est ignoré.");
+            return;
+        }
+        for channel_id in self.store.channels() {
+            self.catch_up_channel(ctx, channel_id).await;
+        }
+        self.catching_up.store(false, Ordering::SeqCst);
+    }
+
+    async fn catch_up_channel(&self, ctx: &Context, channel_id: ChannelId) {
+        let lock = self.channel_lock(channel_id).await;
+        let _guard = lock.lock().await;
+
+        let Some(mut state) = self.store.load(channel_id).await else {
+            return;
+        };
+
+        // Sessions d'avant cette fonctionnalité : on se cale sur le présent
+        // sans rejouer tout l'historique du salon.
+        let Some(last_id) = state.last_message_id else {
+            if let Some(newest) = newest_message_id(ctx, channel_id).await {
+                state.last_message_id = Some(newest);
+                self.save(channel_id, &state).await;
+            }
+            return;
+        };
+
+        let mut messages = match channel_id
+            .messages(
+                &ctx.http,
+                GetMessages::new().after(MessageId::new(last_id)).limit(100),
+            )
+            .await
+        {
+            Ok(messages) => messages,
+            Err(e) => {
+                log::warn!(
+                    "Rattrapage impossible pour le salon {} : {} (permission « Lire l'historique des messages » ?)",
+                    channel_id,
+                    e
+                );
+                return;
+            }
+        };
+        // L'API renvoie les messages du plus récent au plus ancien.
+        messages.sort_by_key(|message| message.id.get());
+        let Some(newest) = messages.last().map(|message| message.id.get()) else {
+            return;
+        };
+
+        let oldest_allowed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since| since.as_secs() as i64 - catchup_max_age_hours() * 3600)
+            .unwrap_or(0);
+
+        let pending: Vec<&Message> = messages
+            .iter()
+            .filter(|message| message.id.get() > last_id)
+            .filter(|message| message.timestamp.unix_timestamp() >= oldest_allowed)
+            .filter(|message| game_action(message).is_some())
+            .collect();
+
+        let limit = catchup_limit();
+        let skipped = pending.len().saturating_sub(limit);
+        let to_play: Vec<&Message> = pending.into_iter().skip(skipped).collect();
+
+        if to_play.is_empty() {
+            state.last_message_id = Some(newest);
+            self.save(channel_id, &state).await;
+            return;
+        }
+
+        // Le rattrapage ne s'annonce pas : le salon voit simplement la suite
+        // de l'histoire arriver.
+        log::info!(
+            "Rattrapage du salon {} : {} action(s) rejouée(s), {} ignorée(s) (trop anciennes ou au-delà de la limite).",
+            channel_id,
+            to_play.len(),
+            skipped
+        );
+
+        let reply = Reply::Channel(ctx, channel_id);
+        for message in to_play {
+            let Some(text) = game_action(message) else {
+                continue;
+            };
+            state.last_message_id = Some(message.id.get());
+            self.handle_player_message(&reply, &mut state, message.author.id, text)
+                .await;
+        }
+
+        // Les messages ignorés (bots, `/ignore`, réponses) font aussi avancer
+        // le marqueur pour ne pas être réexaminés au prochain démarrage.
+        state.last_message_id = Some(newest);
+        self.save(channel_id, &state).await;
+    }
+}
+
+// Dernier message posté dans le salon, utilisé comme marqueur de départ.
+async fn newest_message_id(ctx: &Context, channel_id: ChannelId) -> Option<u64> {
+    match channel_id
+        .messages(&ctx.http, GetMessages::new().limit(1))
+        .await
+    {
+        Ok(messages) => messages.first().map(|message| message.id.get()),
+        Err(e) => {
+            log::warn!(
+                "Impossible de lire les messages du salon {} : {}",
+                channel_id,
+                e
+            );
+            None
+        }
+    }
+}
+
+// Texte d'un message s'il constitue une action de jeu, sinon None.
+fn game_action(msg: &Message) -> Option<&str> {
+    if msg.author.bot {
+        return None;
+    }
+    // Un message qui répond à un autre message du salon (un joueur qui
+    // s'adresse à un autre joueur) n'est pas une action de jeu.
+    if msg.referenced_message.is_some() || msg.message_reference.is_some() {
+        return None;
+    }
+    let text = msg.content.trim();
+    // /ignore permet de parler aux autres joueurs du salon sans que
+    // le message ne soit interprété comme une action du jeu.
+    if text.starts_with("/ignore") || text.starts_with("/i ") || text.starts_with('!') {
+        return None;
+    }
+    if text.is_empty() {
+        return None;
+    }
+    Some(text)
 }
 
 #[async_trait]
@@ -250,21 +482,14 @@ impl EventHandler for Handler {
         } else {
             log::info!("Slash commands enregistrées.");
         }
+
+        // Discord ne rejoue pas les messages reçus pendant une déconnexion :
+        // on va les chercher explicitement dans l'historique des salons.
+        self.catch_up(&ctx).await;
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.author.bot {
-            return;
-        }
-        // Un message qui répond à un autre message du salon (un joueur qui
-        // s'adresse à un autre joueur) n'est pas une action de jeu.
-        if msg.referenced_message.is_some() {
-            return;
-        }
-        // /ignore permet de parler aux autres joueurs du salon sans que
-        // le message ne soit interprété comme une action du jeu.
-        let text = msg.content.trim();
-        if text.starts_with("/ignore") || text.starts_with("/i ") || text.starts_with('!') {
             return;
         }
 
@@ -272,12 +497,12 @@ impl EventHandler for Handler {
         let _guard = lock.lock().await;
 
         // Pas d'aventure en cours dans ce salon : le bot reste silencieux.
-        let state = match self.store.load(msg.channel_id).await {
+        let mut state = match self.store.load(msg.channel_id).await {
             Some(state) => state,
             None => return,
         };
 
-        if text.is_empty() {
+        if msg.content.trim().is_empty() {
             // Une image ou un fichier seul n'est pas une action ; en revanche un
             // contenu vide sur un message texte trahit un intent manquant.
             if msg.attachments.is_empty() && msg.embeds.is_empty() && msg.sticker_items.is_empty() {
@@ -289,8 +514,18 @@ impl EventHandler for Handler {
             return;
         }
 
+        // Le marqueur avance pour tout message vu, y compris ceux qui ne sont
+        // pas des actions : ils n'ont pas à être réexaminés au redémarrage.
+        state.last_message_id = Some(msg.id.get());
+
+        let Some(text) = game_action(&msg) else {
+            self.save(msg.channel_id, &state).await;
+            return;
+        };
+
         let reply = Reply::Channel(&ctx, msg.channel_id);
-        self.play_turn(&reply, state, text).await;
+        self.handle_player_message(&reply, &mut state, msg.author.id, text)
+            .await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -313,35 +548,61 @@ impl EventHandler for Handler {
                 let lock = self.channel_lock(command.channel_id).await;
                 let _guard = lock.lock().await;
 
-                // Conserver le modèle et les préférences d'image de la session précédente
+                // Conserver le modèle et les personnages déjà déclarés.
                 let previous = self.store.load(command.channel_id).await;
                 let mut state = ConversationState {
                     provider: previous.as_ref().and_then(|s| s.provider),
+                    characters: previous
+                        .as_ref()
+                        .map(|s| s.characters.clone())
+                        .unwrap_or_default(),
                     ..Default::default()
                 };
 
                 let initial_state = string_option(&options, "etat").unwrap_or("").trim();
-                let start_msg = if initial_state.is_empty() {
+                let mut start_msg =
                     "Commence une nouvelle aventure dans l'univers de Buffy contre les vampires."
-                        .to_string()
-                } else {
-                    format!(
-                        "Commence une nouvelle aventure dans l'univers de Buffy contre les vampires. État initial : {}",
-                        initial_state
-                    )
-                };
+                        .to_string();
+                if !initial_state.is_empty() {
+                    start_msg.push_str(&format!(" État initial : {}", initial_state));
+                }
+                let roster = state.roster();
+                if !roster.is_empty() {
+                    start_msg.push_str(&format!(
+                        " Les joueurs incarnent déjà ces personnages : {}.",
+                        roster.join(", ")
+                    ));
+                }
 
                 reply
                     .text("🧛 La nuit tombe sur Sunnydale... Une nouvelle aventure commence.")
                     .await;
+                // Le rattrapage ne doit jamais rejouer les messages de
+                // l'aventure précédente : le marqueur repart du présent.
+                state.last_message_id = newest_message_id(&ctx, command.channel_id).await;
+                if !roster.is_empty() {
+                    reply
+                        .text(&format!(
+                            "🎭 Personnages repris de la partie précédente : {}. Changez-en avec `/personnage`.",
+                            roster.join(", ")
+                        ))
+                        .await;
+                }
                 reply.typing().await;
 
-                match common::generate_story(&self.config, &mut state, &start_msg).await {
-                    Ok(story) => {
+                match common::generate_story(&self.config, &mut state, &start_msg, None).await {
+                    Ok(TurnOutcome::Story(story)) => {
                         if let Err(e) = self.store.save(command.channel_id, &state).await {
                             log::error!("Impossible de sauvegarder la session : {}", e);
                         }
                         reply.text(&story.story_text).await;
+                    }
+                    // Sans personnage déclaré, aucun refus n'est possible.
+                    Ok(TurnOutcome::Refused(reason)) => {
+                        log::warn!("Refus inattendu au démarrage : {}", reason);
+                        reply
+                            .text("🧛 La Bouche de l'Enfer brouille les ondes (impossible de démarrer l'aventure). Réessayez !")
+                            .await;
                     }
                     Err(e) => {
                         log::error!("Erreur lors du démarrage du jeu : {}", e);
@@ -422,6 +683,56 @@ impl EventHandler for Handler {
                     }
                 }
             }
+            "personnage" => {
+                let lock = self.channel_lock(command.channel_id).await;
+                let _guard = lock.lock().await;
+
+                let Some(mut state) = self.store.load(command.channel_id).await else {
+                    reply
+                        .text(
+                            "Aucune aventure en cours dans ce salon. Tapez /start pour commencer !",
+                        )
+                        .await;
+                    return;
+                };
+
+                let user = command.user.id.get();
+                let requested = string_option(&options, "nom").unwrap_or("").trim();
+
+                // Sans nom, la commande rappelle qui est qui et propose des rôles.
+                if requested.is_empty() {
+                    reply.text(&character_menu(&state, user)).await;
+                    return;
+                }
+
+                let Some(name) = common::sanitize_character_name(requested) else {
+                    reply
+                        .text("⚠️ Nom de personnage invalide : lettres, espaces, traits d'union et apostrophes uniquement, trois mots au maximum.")
+                        .await;
+                    return;
+                };
+
+                if let Some(owner) = state.owner_of_character(&name) {
+                    if owner != user {
+                        reply
+                            .text(&format!(
+                                "⛔ **{}** est déjà incarné par <@{}>. Choisissez un autre personnage.",
+                                name, owner
+                            ))
+                            .await;
+                        return;
+                    }
+                }
+
+                state.characters.insert(user, name.clone());
+                self.save(command.channel_id, &state).await;
+                reply
+                    .text(&format!(
+                        "🎭 <@{}> incarne **{}**. Dans vos messages, « je » désigne désormais {}.",
+                        user, name, name
+                    ))
+                    .await;
+            }
             "deploy" => {
                 let force = bool_option(&options, "force").unwrap_or(false);
                 handle_deploy(&reply, command.user.id, force).await;
@@ -456,6 +767,13 @@ fn slash_commands() -> Vec<CreateCommand> {
                     .add_string_choice("gemini", "gemini")
                     .add_string_choice("mistral", "mistral"),
             ),
+        CreateCommand::new("personnage")
+            .description("Annoncer qui vous incarnez (sans rien : la liste des personnages).")
+            .add_option(CreateCommandOption::new(
+                CommandOptionType::String,
+                "nom",
+                "Le personnage que vous incarnez, en texte libre (ex : Buffy).",
+            )),
         CreateCommand::new("deploy")
             .description("Déployer la dernière version du bot (admin seulement).")
             .add_option(CreateCommandOption::new(
@@ -486,16 +804,107 @@ fn bool_option(options: &[ResolvedOption<'_>], name: &str) -> Option<bool> {
         })
 }
 
+// Quelques figures de l'univers proposées au joueur qui ne sait pas encore qui
+// incarner. La liste est indicative : n'importe quel nom est accepté.
+const SUGGESTED_CHARACTERS: &[(&str, &str)] = &[
+    (
+        "Buffy",
+        "la Tueuse : force et réflexes surhumains, et un lycée à finir quand même",
+    ),
+    (
+        "Giles",
+        "l'Observateur du Conseil, bibliothécaire, érudit en démons et en vieux grimoires",
+    ),
+    (
+        "Willow",
+        "l'amie surdouée, hackeuse, devenue sorcière de plus en plus puissante",
+    ),
+    (
+        "Alex",
+        "le cœur de la bande (Xander) : aucun pouvoir, beaucoup d'humour et de courage",
+    ),
+    (
+        "Angel",
+        "le vampire à l'âme rendue, rongé par les crimes de son passé",
+    ),
+    (
+        "Spike",
+        "le vampire punk, imprévisible, allié un soir et ennemi le lendemain",
+    ),
+    (
+        "Cordelia",
+        "la reine du lycée, franche jusqu'à la cruauté, plus brave qu'elle ne l'admet",
+    ),
+    (
+        "Faith",
+        "la Tueuse rivale, instinctive, séduisante et dangereuse",
+    ),
+    (
+        "Anya",
+        "l'ex-démone de la vengeance : mille ans de rancune et aucun tact",
+    ),
+    (
+        "Tara",
+        "la sorcière douce et discrète, spécialiste des sorts de protection",
+    ),
+];
+
+// Réponse à `/personnage` sans nom : qui vous êtes, qui sont les autres, et
+// quelques personnages possibles.
+fn character_menu(state: &ConversationState, user: u64) -> String {
+    let mut menu = match state.character_of(user) {
+        Some(name) => format!(
+            "🎭 Vous incarnez **{}**. Dans vos messages, « je » désigne {}.\n\
+             Pour changer, tapez `/personnage` suivi d'un autre nom.\n",
+            name, name
+        ),
+        None => "🎭 Vous n'avez pas encore de personnage : vos actions ne seront pas jouées tant que vous ne vous serez pas annoncé.\n\
+             Tapez `/personnage` suivi du nom de votre choix (par exemple `/personnage Buffy`) — un personnage de la série ou le vôtre.\n".to_string(),
+    };
+
+    let others: Vec<String> = state
+        .characters
+        .iter()
+        .filter(|(id, _)| **id != user)
+        .map(|(id, name)| format!("- **{}** — <@{}>", name, id))
+        .collect();
+    if !others.is_empty() {
+        menu.push_str(&format!(
+            "\nDéjà incarnés dans cette aventure :\n{}\n",
+            others.join("\n")
+        ));
+    }
+
+    menu.push_str("\nQuelques figures de Sunnydale :\n");
+    for (name, description) in SUGGESTED_CHARACTERS {
+        let taken = state
+            .owner_of_character(name)
+            .filter(|owner| *owner != user)
+            .is_some();
+        menu.push_str(&format!(
+            "- **{}** — {}{}\n",
+            name,
+            description,
+            if taken { " *(déjà pris)*" } else { "" }
+        ));
+    }
+    menu
+}
+
 const HELP_TEXT: &str = "🧛 Bienvenue sur la Bouche de l'Enfer ! 🧛\n\n\
      Vous vivez une aventure interactive dans l'univers de Buffy contre les vampires.\n\n\
      **Comment jouer :**\n\
-     - Tapez `/start` pour lancer une nouvelle aventure. L'Observateur vous demandera votre nom, votre rôle et l'époque choisie.\n\
-     - Décrivez ensuite vos actions librement dans le salon, ou choisissez parmi les options proposées.\n\
+     - Tapez `/start` pour lancer une nouvelle aventure.\n\
+     - **Annoncez d'abord qui vous êtes** avec `/personnage Buffy`. Tant que vous ne l'avez pas fait, vos actions sont refusées. `/personnage` sans nom affiche les personnages disponibles.\n\
+     - Décrivez ensuite vos actions à la première personne : « Je pousse la porte ». Le bot sait que « je » = votre personnage.\n\
+     - Vous n'agissez que par votre personnage. « Je prends le bras de Giles, il est stupéfait, et il se met à pleuvoir » est valable ; « Giles ouvre la porte » sera refusé, tout comme faire agir le personnage d'un autre joueur.\n\
      - L'Observateur gère un système de dés (d20) pour les actions à enjeu : combats, rituels, filatures, négociations avec des démons...\n\
      - Préfixez un message par `/ignore` (ou `/i`, ou `!`) pour parler aux autres joueurs sans que le bot ne réagisse.\n\
-     - Répondre à un message (reply) n'est jamais interprété comme une action de jeu.\n\n\
+     - Répondre à un message (reply) n'est jamais interprété comme une action de jeu.\n\
+     - Si le bot était hors ligne, il rattrape à son retour les dernières actions manquées du salon.\n\n\
      **Commandes :**\n\
      `/start [etat]` — Commencer une nouvelle aventure avec un état initial facultatif\n\
+     `/personnage [nom]` — Annoncer qui vous incarnez ; sans nom, la liste des personnages\n\
      `/summary` — Obtenir le journal de l'Observateur, réutilisable comme état initial de `/start`\n\
      `/model gemini|mistral` — Choisir le modèle IA pour la suite de l'aventure\n\
      `/deploy [force]` — Déployer la dernière version (admin)\n\
@@ -736,6 +1145,7 @@ async fn main() {
         config,
         store: SessionStore::new(PathBuf::from("sessions")),
         locks: Mutex::new(HashMap::new()),
+        catching_up: AtomicBool::new(false),
     };
 
     // MESSAGE_CONTENT est un intent privilégié : il doit être activé dans le
@@ -796,6 +1206,26 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chars().count(), 100);
         assert_eq!(chunks[1].chars().count(), 50);
+    }
+
+    #[test]
+    fn character_menu_situates_the_player() {
+        let mut state = ConversationState::default();
+        state.characters.insert(1, "Willow".to_string());
+
+        let unknown = character_menu(&state, 2);
+        assert!(unknown.contains("pas encore de personnage"));
+        assert!(unknown.contains("- **Willow** — <@1>"));
+        // Le personnage d'un autre joueur est signalé comme indisponible.
+        assert!(unknown.contains("**Willow** — l'amie surdouée"));
+        assert!(unknown.contains("*(déjà pris)*"));
+        assert!(unknown.contains("**Giles**"));
+
+        let known = character_menu(&state, 1);
+        assert!(known.contains("Vous incarnez **Willow**"));
+        // Son propre personnage n'est ni « déjà pris » ni listé comme autre joueur.
+        assert!(!known.contains("*(déjà pris)*"));
+        assert!(!known.contains("<@1>"));
     }
 
     #[test]
