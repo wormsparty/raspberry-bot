@@ -37,6 +37,8 @@ Un joueur n'agit que **par son personnage** :
 
 Un même personnage ne peut être incarné que par un seul joueur, et `/personnage` sert aussi à en changer en cours de partie. Les personnages déclarés sont conservés lors d'un nouveau `/start`.
 
+En retour, la narration **nomme qui fait quoi** : comme tout le salon lit le même texte, le narrateur écrit « Buffy s'approche du concierge » plutôt que « Tu t'approches du concierge », et attribue de la même façon les actions des autres personnages et des PNJ. Les 3 options numérotées de fin de tour sont formulées au nom du personnage dont c'est le tour.
+
 ### Comment le bot lit les messages
 
 Une fois `/start` lancé dans un salon, **tout message normal du salon est interprété comme une action de jeu**. Pour discuter entre joueurs sans que le bot ne réagisse :
