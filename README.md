@@ -46,6 +46,8 @@ Une fois `/start` lancé dans un salon, **tout message normal du salon est inter
 
 Tant qu'aucune aventure n'a été lancée dans un salon, le bot reste totalement silencieux.
 
+Un message qui commence par `/` n'est jamais joué comme une action : Discord envoie une commande comme un message ordinaire quand son client ne la connaît pas encore (une commande fraîchement déployée met un moment à apparaître). `/personnage [nom]` et `/help` tapés en toutes lettres sont donc traités comme les slash commands correspondantes ; les autres reçoivent un rappel. Au démarrage, les commandes sont aussi enregistrées serveur par serveur, où elles sont visibles immédiatement.
+
 ### Messages reçus pendant une coupure
 
 Discord ne rejoue pas les messages envoyés pendant qu'un bot est hors ligne. Le bot mémorise donc, dans la session du salon, l'identifiant du dernier message traité ; à chaque (re)connexion, il relit l'historique du salon depuis ce marqueur et joue les actions manquées. Le rattrapage ne s'annonce pas dans le salon : les joueurs voient simplement la suite de l'histoire arriver (le détail est écrit dans les logs).

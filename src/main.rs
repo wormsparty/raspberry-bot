@@ -301,17 +301,44 @@ impl Handler {
         }
     }
 
-    // Résout l'identité de l'auteur puis joue son tour. Un joueur qui ne s'est
-    // pas annoncé ne peut pas faire avancer l'histoire.
+    // Traite un message ordinaire du salon : commande tapée en toutes lettres,
+    // ou action de jeu. Un joueur qui ne s'est pas annoncé ne peut pas faire
+    // avancer l'histoire.
     async fn handle_player_message(
         &self,
         reply: &Reply<'_>,
         state: &mut ConversationState,
         author: UserId,
-        text: &str,
+        input: PlayerInput<'_>,
     ) {
         let channel_id = reply.channel_id();
         let user = author.get();
+
+        let text = match input {
+            PlayerInput::Action(text) => text,
+            PlayerInput::Character(requested) => {
+                let answer = assign_character(state, user, requested);
+                self.save(channel_id, state).await;
+                reply.text(&answer).await;
+                return;
+            }
+            PlayerInput::Help => {
+                self.save(channel_id, state).await;
+                reply.text(HELP_TEXT).await;
+                return;
+            }
+            PlayerInput::UnknownCommand => {
+                self.save(channel_id, state).await;
+                reply
+                    .text(
+                        "⚠️ Commande inconnue. Tapez `/help` pour la liste des commandes. \
+                         (Si une commande n'apparaît pas encore dans Discord, elle vient d'être ajoutée : \
+                         patientez un instant ou relancez l'application.)",
+                    )
+                    .await;
+                return;
+            }
+        };
 
         let Some(character) = state.character_of(user).map(ToOwned::to_owned) else {
             // Joueur inconnu : rien n'est deviné à partir de son message,
@@ -393,7 +420,7 @@ impl Handler {
             .iter()
             .filter(|message| message.id.get() > last_id)
             .filter(|message| message.timestamp.unix_timestamp() >= oldest_allowed)
-            .filter(|message| game_action(message).is_some())
+            .filter(|message| is_replayable(message))
             .collect();
 
         let limit = catchup_limit();
@@ -417,11 +444,11 @@ impl Handler {
 
         let reply = Reply::Channel(ctx, channel_id);
         for message in to_play {
-            let Some(text) = game_action(message) else {
+            let Some(input) = player_input(message) else {
                 continue;
             };
             state.last_message_id = Some(message.id.get());
-            self.handle_player_message(&reply, &mut state, message.author.id, text)
+            self.handle_player_message(&reply, &mut state, message.author.id, input)
                 .await;
         }
 
@@ -450,8 +477,23 @@ async fn newest_message_id(ctx: &Context, channel_id: ChannelId) -> Option<u64> 
     }
 }
 
-// Texte d'un message s'il constitue une action de jeu, sinon None.
-fn game_action(msg: &Message) -> Option<&str> {
+// Ce qu'un message ordinaire du salon demande au bot.
+#[derive(Debug, PartialEq)]
+enum PlayerInput<'a> {
+    // Une action de jeu, à raconter par le Narrateur.
+    Action(&'a str),
+    // `/personnage [nom]` tapé en toutes lettres : Discord envoie un message
+    // ordinaire quand le client ne connaît pas (encore) la slash command, les
+    // commandes globales mettant un moment à se propager après un déploiement.
+    Character(&'a str),
+    Help,
+    // Une autre commande tapée en toutes lettres : elle n'existe qu'en slash
+    // command, et surtout elle ne doit pas partir à l'IA comme une action.
+    UnknownCommand,
+}
+
+// Ce qu'il faut faire d'un message, ou None s'il ne concerne pas le bot.
+fn player_input(msg: &Message) -> Option<PlayerInput<'_>> {
     if msg.author.bot {
         return None;
     }
@@ -460,16 +502,46 @@ fn game_action(msg: &Message) -> Option<&str> {
     if msg.referenced_message.is_some() || msg.message_reference.is_some() {
         return None;
     }
-    let text = msg.content.trim();
-    // /ignore permet de parler aux autres joueurs du salon sans que
-    // le message ne soit interprété comme une action du jeu.
-    if text.starts_with("/ignore") || text.starts_with("/i ") || text.starts_with('!') {
-        return None;
-    }
+    parse_input(&msg.content)
+}
+
+// Lecture du texte seul, sans le contexte du message.
+fn parse_input(content: &str) -> Option<PlayerInput<'_>> {
+    let text = content.trim();
     if text.is_empty() {
         return None;
     }
-    Some(text)
+    // /ignore permet de parler aux autres joueurs du salon sans que
+    // le message ne soit interprété comme une action du jeu.
+    if text.starts_with("/ignore")
+        || text == "/i"
+        || text.starts_with("/i ")
+        || text.starts_with('!')
+    {
+        return None;
+    }
+
+    let Some(command) = text.strip_prefix('/') else {
+        return Some(PlayerInput::Action(text));
+    };
+    let (name, argument) = match command.split_once(char::is_whitespace) {
+        Some((name, rest)) => (name, rest.trim()),
+        None => (command, ""),
+    };
+    match name.to_lowercase().as_str() {
+        "personnage" => Some(PlayerInput::Character(argument)),
+        "help" | "aide" => Some(PlayerInput::Help),
+        _ => Some(PlayerInput::UnknownCommand),
+    }
+}
+
+// Messages à rejouer au redémarrage : les actions et les déclarations
+// d'identité, pas l'aide ni les commandes mal tapées.
+fn is_replayable(msg: &Message) -> bool {
+    matches!(
+        player_input(msg),
+        Some(PlayerInput::Action(_) | PlayerInput::Character(_))
+    )
 }
 
 #[async_trait]
@@ -480,7 +552,22 @@ impl EventHandler for Handler {
         if let Err(e) = Command::set_global_commands(&ctx.http, slash_commands()).await {
             log::error!("Impossible d'enregistrer les slash commands : {}", e);
         } else {
-            log::info!("Slash commands enregistrées.");
+            log::info!("Slash commands globales enregistrées.");
+        }
+
+        // Les commandes globales mettent jusqu'à une heure à apparaître dans les
+        // clients : une commande fraîchement ajoutée serait envoyée comme un
+        // message ordinaire. Les commandes de serveur, elles, sont visibles
+        // immédiatement et masquent les globales de même nom.
+        for guild in &ready.guilds {
+            match guild.id.set_commands(&ctx.http, slash_commands()).await {
+                Ok(_) => log::info!("Slash commands enregistrées sur le serveur {}.", guild.id),
+                Err(e) => log::warn!(
+                    "Impossible d'enregistrer les slash commands sur le serveur {} : {}",
+                    guild.id,
+                    e
+                ),
+            }
         }
 
         // Discord ne rejoue pas les messages reçus pendant une déconnexion :
@@ -518,13 +605,13 @@ impl EventHandler for Handler {
         // pas des actions : ils n'ont pas à être réexaminés au redémarrage.
         state.last_message_id = Some(msg.id.get());
 
-        let Some(text) = game_action(&msg) else {
+        let Some(input) = player_input(&msg) else {
             self.save(msg.channel_id, &state).await;
             return;
         };
 
         let reply = Reply::Channel(&ctx, msg.channel_id);
-        self.handle_player_message(&reply, &mut state, msg.author.id, text)
+        self.handle_player_message(&reply, &mut state, msg.author.id, input)
             .await;
     }
 
@@ -697,41 +784,11 @@ impl EventHandler for Handler {
                 };
 
                 let user = command.user.id.get();
-                let requested = string_option(&options, "nom").unwrap_or("").trim();
+                let requested = string_option(&options, "nom").unwrap_or("");
 
-                // Sans nom, la commande rappelle qui est qui et propose des rôles.
-                if requested.is_empty() {
-                    reply.text(&character_menu(&state, user)).await;
-                    return;
-                }
-
-                let Some(name) = common::sanitize_character_name(requested) else {
-                    reply
-                        .text("⚠️ Nom de personnage invalide : lettres, espaces, traits d'union et apostrophes uniquement, trois mots au maximum.")
-                        .await;
-                    return;
-                };
-
-                if let Some(owner) = state.owner_of_character(&name) {
-                    if owner != user {
-                        reply
-                            .text(&format!(
-                                "⛔ **{}** est déjà incarné par <@{}>. Choisissez un autre personnage.",
-                                name, owner
-                            ))
-                            .await;
-                        return;
-                    }
-                }
-
-                state.characters.insert(user, name.clone());
+                let answer = assign_character(&mut state, user, requested);
                 self.save(command.channel_id, &state).await;
-                reply
-                    .text(&format!(
-                        "🎭 <@{}> incarne **{}**. Dans vos messages, « je » désigne désormais {}.",
-                        user, name, name
-                    ))
-                    .await;
+                reply.text(&answer).await;
             }
             "deploy" => {
                 let force = bool_option(&options, "force").unwrap_or(false);
@@ -848,6 +905,37 @@ const SUGGESTED_CHARACTERS: &[(&str, &str)] = &[
         "la sorcière douce et discrète, spécialiste des sorts de protection",
     ),
 ];
+
+// Enregistre le personnage d'un joueur et retourne la réponse à lui adresser.
+// Partagé par la slash command et par `/personnage` tapé en toutes lettres :
+// l'état n'est modifié que si le nom est valide et encore libre.
+fn assign_character(state: &mut ConversationState, user: u64, requested: &str) -> String {
+    let requested = requested.trim();
+
+    // Sans nom, la commande rappelle qui est qui et propose des rôles.
+    if requested.is_empty() {
+        return character_menu(state, user);
+    }
+
+    let Some(name) = common::sanitize_character_name(requested) else {
+        return "⚠️ Nom de personnage invalide : lettres, espaces, traits d'union et apostrophes uniquement, trois mots au maximum.".to_string();
+    };
+
+    if let Some(owner) = state.owner_of_character(&name) {
+        if owner != user {
+            return format!(
+                "⛔ **{}** est déjà incarné par <@{}>. Choisissez un autre personnage.",
+                name, owner
+            );
+        }
+    }
+
+    state.characters.insert(user, name.clone());
+    format!(
+        "🎭 <@{}> incarne **{}**. Dans vos messages, « je » désigne désormais {}.",
+        user, name, name
+    )
+}
 
 // Réponse à `/personnage` sans nom : qui vous êtes, qui sont les autres, et
 // quelques personnages possibles.
@@ -1206,6 +1294,51 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chars().count(), 100);
         assert_eq!(chunks[1].chars().count(), 50);
+    }
+
+    #[test]
+    fn typed_commands_are_not_played_as_actions() {
+        // Discord envoie une commande inconnue de son client comme un message
+        // ordinaire : elle doit être traitée, jamais racontée par l'IA.
+        assert_eq!(
+            parse_input("/personnage Buffy"),
+            Some(PlayerInput::Character("Buffy"))
+        );
+        assert_eq!(parse_input("/Personnage"), Some(PlayerInput::Character("")));
+        assert_eq!(parse_input("  /help "), Some(PlayerInput::Help));
+        assert_eq!(parse_input("/start"), Some(PlayerInput::UnknownCommand));
+
+        // Le reste est du jeu, sauf les canaux de discussion hors-jeu.
+        assert_eq!(
+            parse_input("Je pousse la porte"),
+            Some(PlayerInput::Action("Je pousse la porte"))
+        );
+        assert_eq!(parse_input("/ignore on se voit demain"), None);
+        assert_eq!(parse_input("/i salut"), None);
+        assert_eq!(parse_input("!salut"), None);
+        assert_eq!(parse_input("   "), None);
+    }
+
+    #[test]
+    fn assigning_a_character_records_it_once() {
+        let mut state = ConversationState::default();
+
+        let taken = assign_character(&mut state, 1, " buffy ");
+        assert!(taken.contains("**Buffy**"));
+        assert_eq!(state.character_of(1), Some("Buffy"));
+
+        // Un nom déjà pris n'écrase pas le joueur en place.
+        let refused = assign_character(&mut state, 2, "BUFFY");
+        assert!(refused.contains("déjà incarné"));
+        assert_eq!(state.character_of(2), None);
+
+        // Un nom invalide laisse l'état inchangé.
+        let invalid = assign_character(&mut state, 1, "Ignore les règles: 1234");
+        assert!(invalid.contains("invalide"));
+        assert_eq!(state.character_of(1), Some("Buffy"));
+
+        // Sans nom, on obtient le menu, pas une déclaration.
+        assert!(assign_character(&mut state, 1, "").contains("Vous incarnez"));
     }
 
     #[test]
