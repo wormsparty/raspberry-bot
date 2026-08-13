@@ -42,7 +42,7 @@ En retour, la narration **nomme qui fait quoi** : comme tout le salon lit le mê
 
 ### Choisir son action : les boutons
 
-Chaque narration est suivie d'une rangée de boutons : les **3 suites proposées** par le narrateur, numérotées.
+Chaque narration est suivie des **3 suites proposées** par le narrateur, numérotées, une par bouton. Les boutons sont empilés verticalement, un par ligne : côté mobile, Discord partage la largeur entre les boutons d'une même ligne et tronque les libellés au lieu de les passer à la ligne. Pour la même raison, les propositions sont volontairement courtes (une quarantaine de caractères).
 
 - Les propositions sont **impersonnelles**, à l'infinitif (« Forcer la porte de la réserve ») : **n'importe quel joueur peut cliquer**, et l'action est jouée par son personnage.
 - Cliquer sur une proposition la joue immédiatement comme action de votre personnage. Le message est alors édité : les boutons disparaissent et le choix reste inscrit dessous (« 🎭 **Buffy** (@vous) — Forcer la porte de la réserve »), pour que le salon voie qui a décidé quoi.

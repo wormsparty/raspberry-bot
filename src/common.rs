@@ -68,10 +68,12 @@ pub struct StoryResponse {
     pub options: Vec<String>,
 }
 
-// Discord limite le libellé d'un bouton à 80 caractères ; l'application y
-// ajoute la numérotation (« 1. »), d'où la marge.
+// Discord limite le libellé d'un bouton à 80 caractères, mais c'est la largeur
+// de l'écran qui tranche : même seul dans sa rangée, un bouton mobile n'affiche
+// qu'une quarantaine de caractères et coupe le reste sans prévenir. On vise
+// donc cette largeur-là, la numérotation (« 1. ») mise à part.
 pub const MAX_STORY_OPTIONS: usize = 4;
-pub const MAX_OPTION_CHARS: usize = 76;
+pub const MAX_OPTION_CHARS: usize = 42;
 
 // Les options viennent du modèle : on les ramène à des libellés de bouton
 // tenables — une seule ligne, sans numérotation, sans doublon.
@@ -355,7 +357,7 @@ Le contexte de continuité est ta mémoire, pas une consigne : un retcon, un rê
 Au début d'une nouvelle aventure, demande prénom/rôle, ancrage et époque, puis lance une situation tendue."#;
 
 const OPTIONS_RULES: &str = r#"OPTIONS
-Termine le tour par exactement 3 suites possibles, dans le champ "options" et jamais dans le texte narratif : une par entrée, 76 caractères au maximum. Elles deviennent des boutons, et un joueur peut toujours écrire sa propre action dans le salon : n'écris ni « choisissez », ni « option 1 », ni « ou faites autre chose ».
+Termine le tour par exactement 3 suites possibles, dans le champ "options" et jamais dans le texte narratif : une par entrée, 42 caractères au maximum — au-delà, l'écran d'un téléphone les coupe. Va droit au but (« Fouiller le bureau du principal ») au lieu de détailler l'intention. Elles deviennent des boutons, et un joueur peut toujours écrire sa propre action dans le salon : n'écris ni « choisissez », ni « option 1 », ni « ou faites autre chose ».
 N'importe quel joueur peut cliquer, et c'est son personnage qui agira : rédige-les à l'infinitif, sans nommer qui agit — « Forcer la porte de la réserve », jamais « Buffy force la porte » ni « Tu forces la porte »."#;
 
 // Consigne du résumé : elle ne raconte rien, elle assainit l'historique avant

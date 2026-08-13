@@ -255,21 +255,23 @@ fn parse_option_id(custom_id: &str) -> Option<(u64, usize)> {
 
 // Les boutons du tour : une option par proposition. Toute autre action s'écrit
 // dans le salon, et sans option il n'y a pas de boutons du tout.
+//
+// Une option par rangée : Discord partage la largeur entre les boutons d'une
+// même rangée et tronque les libellés au lieu de les passer à la ligne. Côté
+// mobile, un quart de largeur ne montre que les premiers mots ; seul un bouton
+// seul dans sa rangée s'étend sur tout l'écran.
 fn action_rows(turn: u64, options: &[String]) -> Vec<CreateActionRow> {
-    if options.is_empty() {
-        return Vec::new();
-    }
-    let buttons: Vec<CreateButton> = options
+    options
         .iter()
         .enumerate()
         .take(common::MAX_STORY_OPTIONS)
         .map(|(index, option)| {
-            CreateButton::new(option_button_id(turn, index))
+            let button = CreateButton::new(option_button_id(turn, index))
                 .label(format!("{}. {}", index + 1, option))
-                .style(ButtonStyle::Secondary)
+                .style(ButtonStyle::Secondary);
+            CreateActionRow::Buttons(vec![button])
         })
-        .collect();
-    vec![CreateActionRow::Buttons(buttons)]
+        .collect()
 }
 
 // Ce qu'on ajoute au message quand ses boutons disparaissent : le salon garde
@@ -1668,26 +1670,43 @@ mod tests {
             "Attendre la nuit".to_string(),
         ];
         let rows = serde_json::to_value(action_rows(3, &options)).unwrap();
-        let buttons = rows[0]["components"].as_array().unwrap();
 
-        // Une option, un bouton : rien d'autre dans la rangée.
-        assert_eq!(buttons.len(), 2);
-        assert_eq!(buttons[0]["label"], "1. Forcer la porte");
-        assert_eq!(buttons[0]["custom_id"], "opt:3:0");
-        assert_eq!(buttons[1]["label"], "2. Attendre la nuit");
-        assert_eq!(buttons[1]["custom_id"], "opt:3:1");
+        // Une option, une rangée, un bouton : c'est ce qui donne au libellé
+        // toute la largeur de l'écran sur mobile.
+        assert_eq!(rows.as_array().unwrap().len(), 2);
+        for row in rows.as_array().unwrap() {
+            assert_eq!(row["components"].as_array().unwrap().len(), 1);
+        }
+        assert_eq!(rows[0]["components"][0]["label"], "1. Forcer la porte");
+        assert_eq!(rows[0]["components"][0]["custom_id"], "opt:3:0");
+        assert_eq!(rows[1]["components"][0]["label"], "2. Attendre la nuit");
+        assert_eq!(rows[1]["components"][0]["custom_id"], "opt:3:1");
 
         // Aucune option : le joueur écrit son action, sans bouton inutile.
         assert!(action_rows(3, &[]).is_empty());
     }
 
     #[test]
-    fn button_labels_fit_the_discord_limit() {
-        // 80 caractères maximum, numérotation comprise.
+    fn button_labels_fit_a_phone_screen() {
+        // La limite Discord est de 80 caractères, celle d'un écran de téléphone
+        // est plus basse : c'est elle qu'on vise. « 1. » s'ajoute au texte de
+        // l'option, d'où les trois caractères de plus.
         let options = common::sanitize_options(&["Buffy ".repeat(40)]);
         let rows = serde_json::to_value(action_rows(1, &options)).unwrap();
         let label = rows[0]["components"][0]["label"].as_str().unwrap();
-        assert!(label.chars().count() <= 80, "libellé trop long : {}", label);
+        assert!(
+            label.chars().count() <= common::MAX_OPTION_CHARS + 3,
+            "libellé trop long : {}",
+            label
+        );
+    }
+
+    #[test]
+    fn options_stay_within_the_five_rows_discord_allows() {
+        // Une option par rangée : le nombre d'options est aussi un nombre de
+        // rangées, et Discord en refuse plus de cinq par message.
+        let options = vec!["Attendre".to_string(); common::MAX_STORY_OPTIONS];
+        assert!(action_rows(1, &options).len() <= 5);
     }
 
     #[test]
