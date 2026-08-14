@@ -104,7 +104,7 @@ pub async fn complete_turn_plan(
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["specialty", "ally", "wounded", "improvised"]
+                            "enum": ["specialty", "ally", "wounded", "improvised", "bold"]
                         }
                     },
                     "story_text": { "type": "string" },

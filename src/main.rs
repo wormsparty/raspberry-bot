@@ -1260,7 +1260,9 @@ const HELP_TEXT: &str = "🧛 Bienvenue sur la Bouche de l'Enfer ! 🧛\n\n\
      - Décrivez ensuite vos actions à la première personne : « Je pousse la porte ». Le bot sait que « je » = votre personnage.\n\
      - Chaque narration se termine par des **boutons** : les 3 suites proposées. Pour tout le reste, écrivez simplement votre action dans le salon.\n\
      - Les propositions ne nomment personne : n'importe quel joueur peut cliquer, et c'est son personnage qui agit. Les boutons d'un tour ne valent que pour ce tour.\n\
-     - Vous n'agissez que par votre personnage. « Je prends le bras de Giles, il est stupéfait, et il se met à pleuvoir » est valable ; « Giles ouvre la porte » sera refusé, tout comme faire agir le personnage d'un autre joueur.\n\
+     - Vous avez la main sur ce que votre personnage perçoit, dit et tente, et sur le décor sans enjeu : « Je pousse la porte et il se met à pleuvoir » passe sans discussion.\n\
+     - Vous pouvez aussi infléchir la scène plus fort (« je découvre une porte dérobée ») : ces déclarations passent par un jet de dé. Un échec ne les efface pas, il les retourne en complication — illusion, méprise, mauvaise surprise.\n\
+     - Seul refus possible : agir à la place du personnage d'un autre joueur, ou décider de ses actes, de ses paroles, de sa position ou de son état. « Giles ouvre la porte » sera refusé.\n\
      - L'Observateur gère un système de dés (d20) pour les actions à enjeu : combats, rituels, filatures, négociations avec des démons...\n\
      - Préfixez un message par `/ignore` (ou `/i`, ou `!`) pour parler aux autres joueurs sans que le bot ne réagisse.\n\
      - Répondre à un message (reply) n'est jamais interprété comme une action de jeu.\n\
